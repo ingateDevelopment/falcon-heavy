@@ -1,0 +1,5 @@
+include README.md
+graft falcon_heavy
+graft tests
+global-exclude *.pyc
+global-exclude *.cache
