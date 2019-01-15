@@ -1,16 +1,17 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
 
 
-Example = types.Schema(
-    name='Example',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
+class ExampleObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
         'summary': types.StringType(),
         'description': types.StringType(),
         'value': types.AnyType(),
         'externalValue': types.StringType()
     }
-)

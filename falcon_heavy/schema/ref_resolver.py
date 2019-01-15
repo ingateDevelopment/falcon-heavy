@@ -1,9 +1,10 @@
-from __future__ import unicode_literals, absolute_import
+from __future__ import unicode_literals
 
+import yaml
 import json
 import contextlib
 
-from six.moves.urllib_parse import urljoin, unquote, urldefrag, urlsplit as _urlsplit, SplitResult
+from six.moves.urllib_parse import urljoin, unquote, urldefrag, urlsplit as _urlsplit, urlparse, SplitResult
 from six.moves.urllib.request import urlopen
 
 try:
@@ -11,8 +12,18 @@ try:
 except ImportError:
     requests = None
 
-from .compat import lru_cache, Sequence, MutableMapping
-from .exceptions import RefResolutionError
+from .._compat import lru_cache, Sequence, MutableMapping
+
+
+__all__ = (
+    'RefResolver',
+    'RefResolutionError',
+    'URIDict'
+)
+
+
+class RefResolutionError(Exception):
+    pass
 
 
 def urlsplit(url):
@@ -225,6 +236,7 @@ class RefResolver(object):
 
         if scheme in self.handlers:
             result = self.handlers[scheme](uri)
+
         elif (
             scheme in ['http', 'https'] and
             requests and
@@ -236,10 +248,18 @@ class RefResolver(object):
                 result = requests.get(uri).json()
             else:
                 result = requests.get(uri).json
+
+        elif scheme == 'file':
+            path = urlparse(uri, 'file').path
+
+            with open(path) as fh:
+                result = yaml.safe_load(fh)
+
         else:
             # Otherwise, pass off to urllib and assume utf-8
             result = json.loads(urlopen(uri).read().decode('utf-8'))
 
         if self.cache_remote:
             self.store[uri] = result
+
         return result

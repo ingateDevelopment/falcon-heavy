@@ -1,4 +1,4 @@
-from __future__ import absolute_import, unicode_literals
+from __future__ import unicode_literals
 
 from collections import namedtuple
 
@@ -43,9 +43,8 @@ SCHEMA_TYPES = namedtuple(
 
 SCHEMA_FORMATS = namedtuple(
     'SCHEMA_FORMATS',
-    ['NONE', 'INT32', 'INT64', 'FLOAT', 'DOUBLE', 'BYTE', 'BINARY', 'DATE', 'DATETIME', 'PASSWORD', 'UUID']
+    ['INT32', 'INT64', 'FLOAT', 'DOUBLE', 'BYTE', 'BINARY', 'DATE', 'DATETIME', 'PASSWORD', 'UUID']
 )(
-    NONE=None,
     INT32='int32',
     INT64='int64',
     FLOAT='float',
@@ -56,6 +55,17 @@ SCHEMA_FORMATS = namedtuple(
     DATETIME='date-time',
     PASSWORD='password',
     UUID='uuid'
+)
+
+
+SECURITY_SCHEME_TYPES = namedtuple(
+    'SECURITY_SCHEME_TYPES',
+    ["API_KEY", "HTTP", "OAUTH2", "OPEN_ID_CONNECT"]
+)(
+    API_KEY='apiKey',
+    HTTP='http',
+    OAUTH2='oauth2',
+    OPEN_ID_CONNECT='openIdConnect'
 )
 
 

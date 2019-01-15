@@ -5,13 +5,55 @@ import string
 import mimetypes
 from io import BytesIO
 
+import six
 from six import string_types
 from six.moves.urllib_parse import urlencode
 
-from werkzeug._compat import to_bytes
-from werkzeug.datastructures import FileStorage
+from falcon.testing import SimpleTestResource, TestClient
 
-from .utils import FormStorage
+from .resource_resolver import AbstractResourceResolver
+from .api import FalconHeavyApi
+from http.datastructures import MultiValueDict, FormStorage, FileStorage
+
+from ._compat import to_bytes
+
+
+class ResourceProxy(object):
+
+    def __init__(self, wrapped):
+        self.wrapped = wrapped
+
+    def on_get(self, req, resp, **kwargs):
+        return self.wrapped.on_get(req, resp, **kwargs)
+
+    def on_post(self, req, resp, **kwargs):
+        return self.wrapped.on_post(req, resp, **kwargs)
+
+
+class SimpleTestResourceResolver(AbstractResourceResolver):
+
+    def __init__(self, resource=None):
+        self.resource = resource or SimpleTestResource()
+
+    def resolve(self, resource_id):
+        return lambda: ResourceProxy(self.resource)
+
+
+def create_client(specification_path, handlers=None):
+    res = SimpleTestResource()
+
+    resource_resolver = SimpleTestResourceResolver(res)
+
+    app = FalconHeavyApi(specification_path, resource_resolver)
+    app.add_route('/', res)
+
+    if handlers:
+        app.req_options.media_handlers.update(handlers)
+
+    client = TestClient(app)
+    client.resource = res
+
+    return client
 
 
 _BOUNDARY_CHARS = string.digits + string.ascii_letters
@@ -31,51 +73,64 @@ def encode_multipart(values, boundary=None, charset='utf-8'):
     def write(s):
         write_binary(s.encode(charset))
 
-    for value in values:
-        if isinstance(value, FormStorage):
-            write('--{0}\r\n'.format(boundary))
-            write('Content-Disposition: form-data; name="{0}"\r\n'.format(value.name))
+    if not isinstance(values, MultiValueDict):
+        values = MultiValueDict(values)
 
-            for header in value.headers:
-                write('{0}: {1}\r\n'.format(*header))
+    for key, values in values.lists():
+        for value in values:
+            write('--{0}\r\nContent-Disposition: form-data; name="{1}"'.format(boundary, key))
 
-            write('\r\n')
+            if isinstance(value, FormStorage):
+                write('\r\n')
 
-            if not isinstance(value, string_types):
-                value = str(value)
+                headers = value.headers.copy()
 
-            value = to_bytes(value, charset)
-            write_binary(value)
+                content_type = value.content_type
+                if content_type is not None:
+                    headers['Content-Type'] = content_type
 
-            write('\r\n')
+                for header in six.iteritems(value.headers):
+                    write('{0}: {1}\r\n'.format(*header))
 
-        elif isinstance(value, FileStorage):
-            reader = value.stream.read
+                write('\r\n')
 
-            write('--{0}\r\n'.format(boundary))
-            write('Content-Disposition: form-data; name="{0}"; filename="{1}"\r\n'.format(
-                value.name, value.filename))
+                value = value.value
+                if not isinstance(value, string_types):
+                    value = str(value)
 
-            content_type = value.content_type
-            if content_type is None:
-                content_type = (
-                    value.filename and mimetypes.guess_type(value.filename)[0] or 'application/octet-stream')
+                value = to_bytes(value, charset)
+                write_binary(value)
 
-            value.headers.set('Content-Type', content_type)
-            for header in value.headers:
-                write('{0}: {1}\r\n'.format(*header))
+            elif isinstance(value, FileStorage):
+                filename = value.filename
 
-            write('\r\n')
+                content_type = value.content_type
+                if content_type is None:
+                    content_type = (
+                        filename and mimetypes.guess_type(filename)[0] or 'application/octet-stream')
 
-            while 1:
-                chunk = reader(16384)
-                if not chunk:
-                    break
+                if filename is not None:
+                    write('; filename="%s"\r\n' % filename)
+                else:
+                    write('\r\n')
 
-                if isinstance(chunk, string_types):
-                    chunk = to_bytes(chunk, charset)
+                headers = value.headers.copy()
+                headers['Content-Type'] = content_type
 
-                write_binary(chunk)
+                for header in six.iteritems(value.headers):
+                    write('{0}: {1}\r\n'.format(*header))
+
+                write('\r\n')
+
+                while True:
+                    chunk = value.read(16 * 1024)
+                    if not chunk:
+                        break
+
+                    if isinstance(chunk, string_types):
+                        chunk = to_bytes(chunk, charset)
+
+                    write_binary(chunk)
 
             write('\r\n')
 
@@ -92,12 +147,15 @@ def encode_multipart(values, boundary=None, charset='utf-8'):
     return body.read(), headers
 
 
-def encode_urlencoded_form(fields):
+def encode_urlencoded_form(values):
     """
-    Encode dict of fields as application/x-www-form-urlencoded.
+    Encode values as application/x-www-form-urlencoded.
 
     """
-    body = urlencode(fields, doseq=1)
+    if not isinstance(values, MultiValueDict):
+        values = MultiValueDict(values)
+
+    body = urlencode(values.lists(), doseq=1)
     headers = {'Content-Type': 'application/x-www-form-urlencoded'}
 
     return body, headers

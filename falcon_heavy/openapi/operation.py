@@ -1,73 +1,54 @@
-import re
+from __future__ import unicode_literals
 
-from six import iterkeys
+import warnings
 
-from ..schema import types, exceptions
+from ..schema import types
 
-from .external_documentation import ExternalDocumentation
-from .parameter import Parameter
-from .response import Response
-from .request_body import RequestBody
-from .callback import Callback
-from .server import Server
-from .extensions import SpecificationExtensions
-
-
-HTTP_STATUS_CODE_PATTERN = re.compile(r'^[1-5](\d{2}|XX)$', re.IGNORECASE)
-HTTP_STATUS_OK_PATTERN = re.compile(r'^2(\d{2}|XX)$', re.IGNORECASE)
+from .base import BaseOpenApiObjectType
+from .types import ReferencedType
+from .external_documentation import ExternalDocumentationObjectType
+from .parameter import ParameterPolymorphic
+from .responses import ResponsesObjectType
+from .request_body import RequestBodyObjectType
+from .callback import CallbackObjectType
+from .server import ServerObjectType
 
 
-def responses_validator(value):
-    """
-    Validates possible responses.
+class OperationObjectType(BaseOpenApiObjectType):
 
-    :param value: Dictionary of possible responses.
-    :type value: dict of Object
-    """
-    if not value:
-        raise exceptions.ValidationError(
-            "The Responses MUST contain at least one response code")
+    __slots__ = []
 
-    if len(set(value.keys())) != len(value.keys()):
-        raise exceptions.ValidationError(
-            "Response codes MUST be unique")
+    MESSAGES = {
+        'deprecated': "Operation '{0}' is deprecated"
+    }
 
-    for key in iterkeys(value):
-        if key != 'default' and not HTTP_STATUS_CODE_PATTERN.match(key):
-            raise exceptions.ValidationError(
-                "Invalid response key. MUST be `default` or HTTP status code")
-
-    if len(value) == 1:
-        key = list(value.keys())[0]
-        if not HTTP_STATUS_OK_PATTERN.match(key):
-            raise exceptions.ValidationError(
-                "Responses SHOULD contains response for the successful operation call")
-
-
-Operation = types.Schema(
-    name='Operation',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
+    PROPERTIES = {
         'tags': types.ArrayType(types.StringType()),
         'summary': types.StringType(),
         'description': types.StringType(),
-        'externalDocs': types.ObjectType(ExternalDocumentation),
+        'externalDocs': ExternalDocumentationObjectType(),
         'operationId': types.StringType(),
         'parameters': types.ArrayType(
-            Parameter,
+            ReferencedType(ParameterPolymorphic),
             unique_items=True,
-            key=lambda parameter: (parameter['name'], parameter['in'])
+            unique_item_properties=['in', 'name']
         ),
-        'requestBody': types.ObjectOrReferenceType(RequestBody),
-        'responses': types.DictType(
-            types.ObjectOrReferenceType(Response),
-            required=True,
-            validators=[responses_validator]
-        ),
-        'callbacks': types.DictType(types.ObjectOrReferenceType(Callback)),
+        'requestBody': ReferencedType(RequestBodyObjectType()),
+        'responses': ResponsesObjectType(),
+        'callbacks': types.MapType(ReferencedType(CallbackObjectType())),
         'deprecated': types.BooleanType(default=False),
-        'security': types.ArrayType(types.DictType(types.ArrayType(types.StringType(), default=[]))),
-        'servers': types.ArrayType(types.ObjectType(Server))
+        'security': types.ArrayType(types.MapType(types.ArrayType(types.StringType())), default=[]),
+        'servers': types.ArrayType(ServerObjectType())
     }
-)
+
+    REQUIRED = {
+        'responses'
+    }
+
+    def _convert(self, raw, path, **context):
+        converted = super(OperationObjectType, self)._convert(raw, path, **context)
+
+        if converted['deprecated']:
+            warnings.warn(self.messages['deprecated'].format(path), DeprecationWarning)
+
+        return converted

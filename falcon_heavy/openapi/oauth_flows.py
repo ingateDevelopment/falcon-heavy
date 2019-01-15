@@ -1,29 +1,16 @@
-from ..schema import types
+from __future__ import unicode_literals
 
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
+from .oauth_flow import OAuthFlowObjectType
 
 
-OAuthFlow = types.Schema(
-    name='OAuthFlow',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'authorizationUrl': types.StringType(required=True),
-        'tokenUrl': types.StringType(required=True),
-        'refreshUrl': types.StringType(),
-        'scopes': types.DictType(types.StringType(), required=True)
+class OAuthFlowsObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'implicit': OAuthFlowObjectType(),
+        'password': OAuthFlowObjectType(),
+        'clientCredentials': OAuthFlowObjectType(),
+        'authorizationCode': OAuthFlowObjectType()
     }
-)
-
-
-OAuthFlows = types.Schema(
-    name='OAuthFlows',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'implicit': types.ObjectType(OAuthFlow),
-        'password': types.ObjectType(OAuthFlow),
-        'clientCredentials': types.ObjectType(OAuthFlow),
-        'authorizationCode': types.ObjectType(OAuthFlow)
-    }
-)

@@ -1,122 +1,224 @@
-from ..schema import types, exceptions, undefined
+from __future__ import unicode_literals
 
-from .schema import Schema
-from .example import Example
-from .enums import PARAMETER_LOCATIONS, PARAMETER_STYLES
-from .extensions import SpecificationExtensions
+import warnings
 
+from wrapt import ObjectProxy
 
-def only_one_entry_validator(value):
-    """
-    Validates that dictionary has only one key-value pair.
+from mimeparse import best_match
 
-    :param value: Dictionary.
-    :type value: Mapping
-    """
-    if value is not None and len(value) != 1:
-        raise exceptions.ValidationError('MUST contains only one entry')
+from .._compat import Mapping
 
+from ..schema import types
+from ..schema.exceptions import SchemaError, Error
 
-def allow_empty_value_validator(value):
-    """
-    Validates `allowEmptyValue` property. This keyword can be
-    specified only for query-parameters.
-
-    :param value: Parameter object.
-    :type value: Object
-    """
-    if value['in'] != PARAMETER_LOCATIONS.QUERY and 'allowEmptyValue' in value:
-        raise exceptions.ValidationError('This is valid only for query parameters')
+from .base import BaseOpenApiObjectType
+from .types import ReferencedType
+from .schema import SchemaObjectType
+from .example import ExampleObjectType
+from .enums import (
+    PARAMETER_LOCATIONS,
+    PARAMETER_STYLES
+)
 
 
-BaseParameter = types.Schema(
-    name='BaseParameter',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'name': types.StringType(required=True),
-        'in': types.StringType(required=True, enum=PARAMETER_LOCATIONS),
+class ParameterContentMapType(types.AbstractType):
+
+    MESSAGES = {
+        'type': "Should be a mapping",
+        'more_than_one_entry': "Should contains only one entry",
+        'unsupported_media_content_type':
+            "Unsupported media content type. Supported only the following content types: {0}"
+    }
+
+    __slots__ = [
+        'subtype',
+        'supported_content_types'
+    ]
+
+    def __init__(self, subtype, supported_content_types, **kwargs):
+        super(ParameterContentMapType, self).__init__(**kwargs)
+        self.subtype = subtype
+        self.supported_content_types = supported_content_types
+
+    def _convert(self, raw, path, **context):
+        if not isinstance(raw, Mapping):
+            raise SchemaError(Error(path, self.messages['type']))
+
+        if len(raw) != 1:
+            raise SchemaError(Error(path, self.messages['more_than_one_entry']))
+
+        k, v = list(raw.items())[0]
+
+        return k, self.subtype.convert(v, path / k, **context)
+
+    def validate_content_type(self, converted, raw):
+        content_type, _ = converted
+        if not best_match(self.supported_content_types, content_type):
+            return self.messages['unsupported_media_content_type'].format(
+                ', '.join(sorted(self.supported_content_types)))
+
+
+class ParameterObjectProxy(ObjectProxy):
+
+    __slots__ = [
+        '_self_path'
+    ]
+
+    def __init__(self, wrapped, path):
+        super(ParameterObjectProxy, self).__init__(wrapped)
+        self._self_path = path
+
+    @property
+    def path(self):
+        return self._self_path
+
+    @path.setter
+    def path(self, value):
+        self._self_path = value
+
+
+class BaseParameterObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    MESSAGES = {
+        'deprecated': "Parameter '{0}' is deprecated",
+        'mutually_exclusive_schema_content_keywords': "The keywords `schema` and `content` are mutually exclusive"
+    }
+
+    PROPERTIES = {
         'description': types.StringType(),
         'required': types.BooleanType(default=False),
         'deprecated': types.BooleanType(default=False),
-        'allowEmptyValue': types.BooleanType(),
         'style': types.StringType(enum=PARAMETER_STYLES),
         'explode': types.BooleanType(),
         'allowReserved': types.BooleanType(
-            default=False,
             enum=[False],
-            messages={'enum': "`allowReserved` permanently unsupported"}
+            messages={'enum': "`allowReserved` permanently unsupported"},
+            default=False
         ),
-        'schema': types.ObjectOrReferenceType(Schema),
+        'schema': ReferencedType(SchemaObjectType()),
         'example': types.AnyType(),
-        'examples': types.DictType(types.ObjectOrReferenceType(Example)),
-        'content': types.DictType(types.ObjectType(lambda: MediaType), validators=[only_one_entry_validator])
-    },
-    validators={
-        'allowEmptyValue': allow_empty_value_validator
-    },
-    defaults={
-        'explode': lambda data, value: value['style'] == PARAMETER_STYLES.FORM,
-        'allowEmptyValue': (
-            lambda data, value: False if value['in'] == PARAMETER_LOCATIONS.QUERY else undefined.Undefined)
+        'examples': types.MapType(ReferencedType(ExampleObjectType())),
+        'content': ParameterContentMapType(
+            types.LazyType(lambda: MediaTypeObjectType()),
+            ('application/json', )
+        )
     }
-)
+
+    def _convert(self, raw, path, **context):
+        converted = super(BaseParameterObjectType, self)._convert(raw, path, **context)
+
+        if converted['deprecated']:
+            warnings.warn(self.messages['deprecated'].format(path), DeprecationWarning)
+
+        if 'explode' not in converted:
+            converted.properties['explode'] = converted['style'] == PARAMETER_STYLES.FORM
+
+        return ParameterObjectProxy(converted, path)
+
+    def validate_mutually_exclusive_schema_content_keywords(self, converted, raw):
+        if 'schema' in converted and 'content' in converted:
+            return self.messages['mutually_exclusive_schema_content_keywords']
 
 
-PathParameter = types.Schema(
-    name='PathParameter',
-    bases=BaseParameter,
-    properties={
+class NamedParameterObjectType(BaseParameterObjectType):
+
+    PROPERTIES = {
+        'name': types.StringType()
+    }
+
+    REQUIRED = {
+        'name'
+    }
+
+
+class PathParameterObjectType(NamedParameterObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'in': types.StringType(enum=(PARAMETER_LOCATIONS.PATH,)),
         'required': types.BooleanType(
-            required=True,
             enum=[True],
-            messages={'enum': "For path parameter this property MUST be TRUE"}
+            messages={'enum': "For path parameter this property must be True"}
         ),
-        'style': types.StringType(default=PARAMETER_STYLES.SIMPLE, enum=PARAMETER_STYLES)
+        'style': types.StringType(
+            enum=(
+                PARAMETER_STYLES.SIMPLE,
+                PARAMETER_STYLES.LABEL,
+                PARAMETER_STYLES.MATRIX
+            ),
+            default=PARAMETER_STYLES.SIMPLE
+        )
+    }
+
+    REQUIRED = {
+        'in',
+        'required'
+    }
+
+
+class QueryParameterObjectType(NamedParameterObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'in': types.StringType(enum=(PARAMETER_LOCATIONS.QUERY,)),
+        'allowEmptyValue': types.BooleanType(default=False),
+        'style': types.StringType(
+            enum=(
+                PARAMETER_STYLES.FORM,
+                PARAMETER_STYLES.SPACE_DELIMITED,
+                PARAMETER_STYLES.PIPE_DELIMITED,
+                PARAMETER_STYLES.DEEP_OBJECT
+            ),
+            default=PARAMETER_STYLES.FORM
+        )
+    }
+
+    REQUIRED = {
+        'in'
+    }
+
+
+class HeaderParameterObjectType(NamedParameterObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'in': types.StringType(enum=(PARAMETER_LOCATIONS.HEADER,)),
+        'style': types.StringType(enum=(PARAMETER_STYLES.SIMPLE, ), default=PARAMETER_STYLES.SIMPLE)
+    }
+
+    REQUIRED = {
+        'in'
+    }
+
+
+class CookieParameterObjectType(NamedParameterObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'in': types.StringType(enum=(PARAMETER_LOCATIONS.COOKIE,)),
+        'style': types.StringType(enum=(PARAMETER_STYLES.FORM, ), default=PARAMETER_STYLES.FORM)
+    }
+
+    REQUIRED = {
+        'in'
+    }
+
+
+ParameterPolymorphic = types.DiscriminatorType(
+    property_name='in',
+    mapping={
+        PARAMETER_LOCATIONS.PATH: PathParameterObjectType(),
+        PARAMETER_LOCATIONS.QUERY: QueryParameterObjectType(),
+        PARAMETER_LOCATIONS.HEADER: HeaderParameterObjectType(),
+        PARAMETER_LOCATIONS.COOKIE: CookieParameterObjectType()
     }
 )
 
 
-QueryParameter = types.Schema(
-    name='QueryParameter',
-    bases=BaseParameter,
-    properties={
-        'style': types.StringType(default=PARAMETER_STYLES.FORM, enum=PARAMETER_STYLES)
-    }
-)
-
-
-HeaderParameter = types.Schema(
-    name='HeaderParameter',
-    bases=BaseParameter,
-    properties={
-        'style': types.StringType(default=PARAMETER_STYLES.SIMPLE, enum=PARAMETER_STYLES)
-    }
-)
-
-
-CookieParameter = types.Schema(
-    name='CookieParameter',
-    bases=BaseParameter,
-    properties={
-        'schema': types.ObjectOrReferenceType(Schema, required=True),
-        'style': types.StringType(default=PARAMETER_STYLES.FORM, enum=PARAMETER_STYLES)
-    }
-)
-
-
-Parameter = types.OneOfType(
-    property_types=[],
-    discriminator=types.Discriminator(
-        property_name='in',
-        mapping={
-            'path': types.ObjectOrReferenceType(PathParameter),
-            'query': types.ObjectOrReferenceType(QueryParameter),
-            'header': types.ObjectOrReferenceType(HeaderParameter),
-            'cookie': types.ObjectOrReferenceType(CookieParameter)
-        }
-    )
-)
-
-
-from .media_type import MediaType  # noqa
+from .media_type import MediaTypeObjectType  # noqa

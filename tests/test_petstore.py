@@ -6,15 +6,10 @@ import json
 import unittest
 import base64
 
-from six.moves import StringIO
-
 import falcon
 from falcon import testing
 
-from werkzeug.datastructures import FileStorage, Headers
-
-from falcon_heavy.testing import encode_multipart, encode_urlencoded_form
-from falcon_heavy.utils import FormStorage
+from hic_falcon_heavy.testing import encode_urlencoded_form
 
 from .petstore.server import application
 
@@ -62,50 +57,11 @@ class PetstoreTest(testing.TestCase):
         self.assertEqual(resp.status, falcon.HTTP_500)
         self.assertEqual(resp.json['code'], 314)
 
-    def test_multipart(self):
-        body, headers = encode_multipart((
-            FormStorage(
-                name='id',
-                value='1'
-            ),
-            FormStorage(
-                name='meta',
-                value=json.dumps({'name': 'Max'}),
-                content_type='application/json'
-            ),
-            FormStorage(
-                name='cotleta',
-                value=json.dumps({'name': 'Jared Leto'}),
-                content_type='application/json'
-            ),
-            FormStorage(
-                name='cotleta',
-                value=json.dumps({'name': 'Jared Leto'}),
-                content_type='application/json'
-            ),
-            FileStorage(
-                name='photo',
-                stream=StringIO('cute puppy'),
-                filename='cam.jpg',
-                content_type='image/png',
-                headers=Headers({'X-Rate-Limit-Limit': 1})
-            )
-        ))
-
-        resp = self.simulate_post('/test-multipart', body=body, headers=headers)
-        self.assertEqual(resp.status, falcon.HTTP_200)
-        self.assertEqual(resp.json, 'cam.jpg')
-
-        data, headers = encode_multipart({}, {})
-
-        resp = self.simulate_post('/test-multipart', body=data, headers=headers)
-        self.assertEqual(resp.status, falcon.HTTP_400)
-
     def test_www_form_urlencoded(self):
         body, headers = encode_urlencoded_form({'id': '45', 'file_name': 'adobe_русский.pdf 45'})
         resp = self.simulate_post('/test-urlencoded', body=body, headers=headers)
         self.assertEqual(resp.status, falcon.HTTP_200)
-        self.assertEqual(resp.json, [45, u'adobe_русский.pdf 45'])
+        self.assertEqual([45, u'adobe_русский.pdf 45'], resp.json)
 
     def test_styles(self):
         resp = self.simulate_get('/test-styles-array', query_string='x=1,2,3')

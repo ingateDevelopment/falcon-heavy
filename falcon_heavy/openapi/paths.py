@@ -1,15 +1,21 @@
+from __future__ import unicode_literals
+
 import re
 
-from ..schema import types
+from .base import BaseOpenApiObjectType
+from .types import ReferencedType
+from .path_item import PathItemObjectType
 
-from .path_item import PathItem, update_parameters
 
+class PathsObjectType(BaseOpenApiObjectType):
 
-Paths = types.Schema(
-    name='Paths',
-    pattern_properties=[
-        (re.compile(r'^x-'), types.AnyType()),
-        (re.compile(r'^/'), types.ObjectOrReferenceType(PathItem, postprocessor=update_parameters))
-    ],
-    additional_properties=False
-)
+    __slots__ = []
+
+    MESSAGES = {
+        'extra_properties': "Paths must be starts with slash."
+                            " The following invalid paths were found: {0}"
+    }
+
+    PATTERN_PROPERTIES = {
+        re.compile(r'^/'): ReferencedType(PathItemObjectType())
+    }

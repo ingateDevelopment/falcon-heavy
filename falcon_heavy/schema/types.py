@@ -1,63 +1,65 @@
-from __future__ import unicode_literals, absolute_import
+from __future__ import unicode_literals
 
 import re
+import json
 import datetime
-import weakref
 import operator
+import decimal
 from collections import OrderedDict
 from distutils.util import strtobool
-from contextlib import contextmanager
 
 import rfc3987
-import strict_rfc3339
+from strict_rfc3339 import InvalidRFC3339Error, rfc3339_to_timestamp
 
-from six import string_types, text_type, iteritems, with_metaclass
+from six import string_types, integer_types, iteritems, iterkeys, with_metaclass
 from six.moves import StringIO, reduce
 
-from ..utils import (
-    coalesce,
+from ..utils.encoding import (
     Base64EncodableStream,
     Base64DecodableStream
 )
-from .compat import ChainMap, Mapping
-from .cursor import Cursor
-from .utils import uniq, prepare_validator, is_file_like
+
+from ..utils.functional import cached_property
+from ..utils.encoding import force_text
+
+from .._compat import ChainMap, Mapping
+
 from .undefined import Undefined
+from .utils import uniq, is_flo
 from .exceptions import (
-    SchemaError,
-    UnmarshallingError,
-    ValidationError,
-    PolymorphicError,
-    DiscriminatorError
+    Error,
+    SchemaError
 )
 
 
 class Object(ChainMap):
 
-    """Object representation.
+    """Object
 
-    :param url: Uri where the object was obtained.
+    Contains property values
     """
 
-    def __init__(self, url):
-        self.url = url
-        super(Object, self).__init__({}, {}, {}, {})
-
-    @property
-    def changes(self):
-        return self.maps[0]
+    def __init__(self,
+                 properties=None,
+                 pattern_properties=None,
+                 additional_properties=None):
+        super(Object, self).__init__(
+            properties or {},
+            pattern_properties or {},
+            additional_properties or {}
+        )
 
     @property
     def properties(self):
-        return self.maps[1]
+        return self.maps[0]
 
     @property
     def pattern_properties(self):
-        return self.maps[2]
+        return self.maps[1]
 
     @property
     def additional_properties(self):
-        return self.maps[3]
+        return self.maps[2]
 
     def __delitem__(self, key):
         did_delete = False
@@ -71,7 +73,12 @@ class Object(ChainMap):
             raise KeyError(key)
 
     def __repr__(self):
-        return repr(dict(self))
+        return "%s(%r, %r, %r)" % (
+            self.__class__.__name__,
+            self.properties,
+            self.pattern_properties,
+            self.additional_properties
+        )
 
     def __or__(self, other):
         if not isinstance(other, Mapping):
@@ -86,219 +93,159 @@ class Object(ChainMap):
 
         return self
 
-    @staticmethod
-    def from_file(schema, path, strict=True, resolver_handlers=None):
-        return ObjectType(schema).unmarshal(
-            Cursor.from_file(path, resolver_handlers=resolver_handlers),
-            context=Context(strict=strict)
-        )
-
-    @staticmethod
-    def from_raw(schema, raw, strict=True, resolver_handlers=None):
-        return ObjectType(schema).unmarshal(
-            Cursor.from_raw(raw, resolver_handlers=resolver_handlers),
-            context=Context(strict=strict)
-        )
+    def __hash__(self):
+        return hash(json.dumps(self, sort_keys=True))
 
 
-class Context(object):
-
-    def __init__(self, strict=True):
-        self.strict = strict
-        self.registry = {}
-
-    @contextmanager
-    def in_scope(self):
-        old_strict = self.strict
-        try:
-            yield
-        finally:
-            self.strict = old_strict
-
-
-class TypeMeta(type):
+class ConvertibleMeta(type):
 
     def __new__(mcs, name, bases, attrs):
         messages = {}
-        validators = OrderedDict()
 
         for base in reversed(bases):
             if hasattr(base, 'MESSAGES'):
                 messages.update(base.MESSAGES)
 
-            if hasattr(base, "VALIDATORS"):
-                validators.update(base.VALIDATORS)
-
         if 'MESSAGES' in attrs:
             messages.update(attrs['MESSAGES'])
 
-        for attr_name, attr in attrs.items():
-            if attr_name.startswith("validate_"):
-                validators[attr_name] = 1
-                attrs[attr_name] = prepare_validator(attr, 2)
-
         klass = type.__new__(mcs, name, bases, attrs)
         klass.MESSAGES = messages
+
+        return klass
+
+
+class AbstractConvertible(with_metaclass(ConvertibleMeta, object)):
+
+    __slots__ = [
+        '__weakref__',
+        'messages'
+    ]
+
+    def __init__(self, messages=None):
+        self.messages = dict(self.MESSAGES, **(messages or {}))
+
+    def convert(self, raw, path, **context):
+        """Returns converted and valid value"""
+        raise NotImplementedError
+
+
+class TypeMeta(ConvertibleMeta):
+
+    def __new__(mcs, name, bases, attrs):
+        validators = OrderedDict()
+
+        for base in reversed(bases):
+            if hasattr(base, "VALIDATORS"):
+                validators.update(base.VALIDATORS)
+
+        for attr_name, attr in attrs.items():
+            if attr_name.startswith('validate_'):
+                validators[attr_name] = 1
+
+        klass = ConvertibleMeta.__new__(mcs, name, bases, attrs)
         klass.VALIDATORS = validators
 
         return klass
 
 
-class AbstractUnmarshallable(object):
+class AbstractType(with_metaclass(TypeMeta, AbstractConvertible)):
 
-    __slots__ = [
-        '__weakref__'
-    ]
+    """Abstract type
 
-    def unmarshal(self, cursor, context=None):
-        raise NotImplementedError
-
-
-class AbstractType(with_metaclass(TypeMeta, AbstractUnmarshallable)):
-
-    """Abstract class of property types.
-
-    :param required:
-        Invalidate property when value is not supplied. Default: False.
-    :param nullable:
-        Invalidate property when value is None. Default: False.
-    :param default:
-        Provide default value. Default: Undefined.
-    :param validators:
-        A list of callables. Each callable receives the value after it has been
-        unmarshalled. Default: None
-    :param enum:
-        Provide possible property values.
-    :param strict:
-        Indicates that the property value type must match exactly the property type.
-        Strict value propagate to all nested properties. Default: None.
-    :param messages:
-        Override the error messages with a dict. You can also do this by
-        subclassing the Type and defining a `MESSAGES` dict attribute on the
-        class. A metaclass will merge all the `MESSAGES` and override the
-        resulting dict with instance level `messages` and assign to
-        `self.messages`.
-    :param preprocessor:
-        Callable that may modify value before unmarshalling and validation.
-    :param postprocessor:
-        Callable that may modify value after unmarshalling and validation.
+    :param default: default value
+    :type default: any
+    :param nullable: invalidate the property when value is None
+    :type nullable: bool
+    :param enum: determines the possible values of the property
+    :type enum: list of any
     """
 
     MESSAGES = {
-        'enum': "Value is invalid. Expected one of: {0}",
-        'required': "Missing value of required property",
-        'null': "Property not allow null values",
+        'nullable': "Null values not allowed",
+        'enum': "Should be equal to one of the allowed values. Allowed values: {0}"
     }
 
     __slots__ = [
-        'required',
-        'nullable',
         'default',
-        'validators',
+        'nullable',
         'enum',
-        'strict',
-        'messages',
-        'preprocessor',
-        'postprocessor'
+        'validators'
     ]
 
-    def __init__(self,
-                 required=False,
-                 nullable=False,
-                 default=Undefined,
-                 validators=None,
-                 enum=None,
-                 strict=None,
-                 messages=None,
-                 preprocessor=None,
-                 postprocessor=None):
-        self.required = required
-        self.nullable = nullable
+    def __init__(self, default=Undefined, nullable=False, enum=None, validators=None, **kwargs):
         self.default = default
+        self.nullable = nullable
+        self.enum = enum
+
         self.validators = [getattr(self, validator_name) for validator_name in self.VALIDATORS]
         if validators:
-            for validator in validators:
-                assert callable(validator), "Validator MUST be a callable"
-            self.validators.extend([prepare_validator(validator, 2) for validator in validators])
-        self.enum = tuple(enum) if enum is not None else None
-        self.strict = strict
-        self.messages = dict(self.MESSAGES, **(messages or {}))
-        assert preprocessor is None or callable(preprocessor), "Preprocessor MUST be a callable"
-        self.preprocessor = preprocessor
-        assert postprocessor is None or callable(postprocessor), "Postprocessor MUST be a callable"
-        self.postprocessor = postprocessor
+            self.validators.extend(validators)
 
-    def validate_enum(self, value):
-        if self.enum and value not in self.enum:
-            raise ValidationError(
-                self.messages['enum'].format(', '.join(map(str, self.enum))))
+        super(AbstractType, self).__init__(**kwargs)
 
-    def _validate(self, value):
-        errors = []
-        for validator in self.validators:
-            try:
-                validator(value)
-            except ValidationError as e:
-                errors.extend(e.errors)
-        if errors:
-            raise ValidationError(errors)
-
-        return value
-
-    def _unmarshal(self, cursor, context):
+    def _convert(self, raw, path, **context):
         raise NotImplementedError
 
-    def unmarshal(self, cursor, context=None):
-        context = context or Context()
+    def convert(self, raw, path, **context):
+        if not self.nullable and raw is None:
+            raise SchemaError(Error(path, self.messages['nullable']))
 
-        if self.preprocessor is not None:
-            cursor.value = self.preprocessor(cursor.value)
+        if raw is None:
+            return None
 
-        if cursor.is_undefined and self.required:
-            raise UnmarshallingError(self.messages['required'])
+        if raw is Undefined:
+            if self.default is Undefined:
+                return Undefined
+            else:
+                raw = self.default
+                converted = self._convert(raw, path, **context)
+        else:
+            converted = self._convert(raw, path, **context)
 
-        if cursor.is_undefined and self.default is not Undefined:
-            cursor.value = self.default
+        errors = []
+        for validator in self.validators:
+            message = validator(converted, raw)
+            if message is not None:
+                errors.append(Error(path, message))
 
-        if cursor.is_null and not self.nullable:
-            raise UnmarshallingError(self.messages['null'])
+        if errors:
+            raise SchemaError(*errors)
 
-        if cursor.is_null or cursor.is_undefined:
-            return cursor.value
+        return converted
 
-        with context.in_scope():
-            context.strict = coalesce(self.strict, context.strict)
-            unmarshalled = self._validate(self._unmarshal(cursor, context))
-
-        if self.postprocessor is not None:
-            unmarshalled = self.postprocessor(unmarshalled)
-
-        return unmarshalled
+    def validate_enum(self, converted, raw):
+        if self.enum and raw not in self.enum and converted not in self.enum:
+            return self.messages['enum'].format(', '.join(sorted(map(str, self.enum))))
 
 
 class AnyType(AbstractType):
 
+    """Any type"""
+
     __slots__ = []
 
-    def _unmarshal(self, cursor, context):
-        return cursor.value
+    def _convert(self, raw, path, **context):
+        return raw
 
 
 class StringType(AbstractType):
 
-    """String property type.
+    """String type
 
-    :param min_length: Invalidate property when value length less than specified. Default: None.
-    :param max_length: Invalidate property when value length more than specified. Default: None.
-    :param pattern: Compiled regular expression. Invalidate property when value is not match
-        to this pattern. Default: None.
+    :param min_length: invalidate the property when value length less than specified
+    :type min_length: int
+    :param max_length: invalidate the property when value length greater than specified
+    :type max_length: int
+    :param pattern: invalidate when value is not match to specified pattern
+    :type pattern: re._pattern_type
     """
 
     MESSAGES = {
-        'unmarshal': "Couldn't interpret value as string",
-        'min_length': "Value length is lower than {0} symbols",
-        'max_length': "Value length is greater than {0} symbols",
-        'pattern': "Value did not match to pattern"
+        'type': "Should be a string",
+        'min_length': "Must be no less than {0} characters in length",
+        'max_length': "Must be no greater than {0} characters in length",
+        'pattern': "Does not match to pattern"
     }
 
     __slots__ = [
@@ -313,51 +260,54 @@ class StringType(AbstractType):
         self.pattern = pattern
         super(StringType, self).__init__(**kwargs)
 
-    def _unmarshal(self, cursor, context):
-        if cursor.is_string:
-            return cursor.value
+    def _convert(self, raw, path, strict=True, **context):
+        if isinstance(raw, string_types):
+            return raw
 
-        if context.strict:
-            raise UnmarshallingError(self.messages['unmarshal'])
+        if strict:
+            raise SchemaError(Error(path, self.messages['type']))
 
-        try:
-            return text_type(cursor.value)
-        except (TypeError, ValueError):
-            raise UnmarshallingError(self.messages['unmarshal'])
+        return force_text(raw, errors='replace')
 
-    def validate_length(self, value):
-        if self.min_length is not None and len(value) < self.min_length:
-            raise ValidationError(self.messages['min_length'].format(self.min_length))
+    def validate_length(self, converted, raw):
+        if self.min_length is not None and len(converted) < self.min_length:
+            return self.messages['min_length'].format(self.min_length)
 
-        if self.max_length is not None and len(value) > self.max_length:
-            raise ValidationError(self.messages['max_length'].format(self.max_length))
+        if self.max_length is not None and len(converted) > self.max_length:
+            return self.messages['max_length'].format(self.max_length)
 
-    def validate_pattern(self, value):
-        if self.pattern is not None and self.pattern.match(value) is None:
-            raise ValidationError(self.messages['pattern'])
+    def validate_pattern(self, converted, raw):
+        if self.pattern is not None and self.pattern.match(converted) is None:
+            return self.messages['pattern']
 
 
-class AbstractNumberType(AbstractType):
+class NumberType(AbstractType):
 
-    """Abstract number property type.
+    """Number type
 
-    :param minimum: Specifies a minimum numeric value. Default: None.
-    :param maximum: Specifies a maximum numeric value. Default: None.
-    :param exclusive_minimum: When True, it indicates that the range excludes the minimum value.
-        When False (or not included), it indicates that the range includes the minimum value.
-        Default: False.
-    :param exclusive_maximum: When True, it indicates that the range excludes the maximum value.
-        When false (or not included), it indicates that the range includes the maximum value.
-        Default: False.
-    :param multiple_of: Shows that value must be the multiple of a given number. Default: None.
+    :param minimum: invalidate the property when value less than specified minimum
+    :type minimum: float | int
+    :param maximum: Invalidate the property when value greater than specified maximum
+    :type maximum: float | int
+    :param exclusive_minimum: when True, it indicates that the range excludes the minimum value.
+        When False (or not included), it indicates that the range includes the minimum value
+    :type exclusive_minimum: bool
+    :param exclusive_maximum: when True, it indicates that the range excludes the maximum value.
+        When false (or not included), it indicates that the range includes the maximum value
+    :type exclusive_maximum: bool
+    :param multiple_of: invalidate the property when value is not multiple of specified
+    :type multiple_of: float | int
     """
 
     MESSAGES = {
-        'minimum': "Value is lower than {0}",
-        'exclusive_minimum': "Value is not greater than {0}",
-        'maximum': "Value is greater than {0}",
-        'exclusive_maximum': "Value is not lower than {0}",
-        'multiple_of': "Value is not a multiple of {0}",
+        'type': "Should be a number",
+        'convert': "Couldn't convert to a number",
+        'minimum': "Is less than the minimum of {0}",
+        'exclusive_minimum': "Is less than or equal to the minimum of {0}",
+        'maximum': "Is greater than the maximum of {0}",
+        'exclusive_maximum': "Is greater than or equal to the maximum of {0}",
+        'multiple_of': "Is not a multiple of {0}"
+
     }
 
     __slots__ = [
@@ -379,220 +329,243 @@ class AbstractNumberType(AbstractType):
         self.maximum = maximum
         self.exclusive_minimum = exclusive_minimum
         self.exclusive_maximum = exclusive_maximum
-        assert multiple_of != 0, "Value can't be a multiple of zero"
         self.multiple_of = multiple_of
-        super(AbstractNumberType, self).__init__(**kwargs)
+        super(NumberType, self).__init__(**kwargs)
 
-    def validate_range(self, value):
+    def _convert(self, raw, path, strict=True, **context):
+        if isinstance(raw, integer_types + (float, decimal.Decimal)):
+            return raw
+
+        if strict:
+            raise SchemaError(Error(path, self.messages['type']))
+
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            raise SchemaError(Error(path, self.messages['convert']))
+
+    def validate_minimum(self, converted, raw):
         if self.minimum is not None:
-            if self.exclusive_minimum and value <= self.minimum:
-                raise ValidationError(self.messages['exclusive_minimum'].format(self.minimum))
-            if not self.exclusive_minimum and value < self.minimum:
-                raise ValidationError(self.messages['minimum'].format(self.minimum))
+            if self.exclusive_minimum and converted <= self.minimum:
+                return self.messages['exclusive_minimum'].format(self.minimum)
 
+            if not self.exclusive_minimum and converted < self.minimum:
+                return self.messages['minimum'].format(self.minimum)
+
+    def validate_maximum(self, converted, raw):
         if self.maximum is not None:
-            if self.exclusive_maximum and value >= self.maximum:
-                raise ValidationError(self.messages['exclusive_maximum'].format(self.maximum))
-            if not self.exclusive_maximum and value > self.maximum:
-                raise ValidationError(self.messages['maximum'].format(self.maximum))
+            if self.exclusive_maximum and converted >= self.maximum:
+                return self.messages['exclusive_maximum'].format(self.maximum)
 
-    def validate_multiple_of(self, value):
-        if self.multiple_of is None:
-            return
+            if not self.exclusive_maximum and converted > self.maximum:
+                return self.messages['maximum'].format(self.maximum)
 
-        if isinstance(self.multiple_of, float):
-            quotient = value / self.multiple_of
-            failed = int(quotient) != quotient
-        else:
-            failed = value % self.multiple_of
+    def validate_multiple_of(self, converted, raw):
+        if self.multiple_of is not None:
+            if isinstance(self.multiple_of, float):
+                quotient = converted / self.multiple_of
+                failed = int(quotient) != quotient
+            else:
+                failed = converted % self.multiple_of
 
-        if failed:
-            raise ValidationError(self.messages['multiple_of'].format(self.multiple_of))
+            if failed:
+                return self.messages['multiple_of'].format(self.multiple_of)
 
 
-class IntegerType(AbstractNumberType):
+class IntegerType(NumberType):
 
-    """Integer property type."""
+    """Integer type"""
 
     MESSAGES = {
-        'unmarshal': "Couldn't interpret value as integer",
+        'type': "Should be an integer",
+        'convert': "Couldn't convert to an integer"
     }
 
     __slots__ = []
 
-    def _unmarshal(self, cursor, context):
-        if cursor.is_integer:
-            return cursor.value
+    def _convert(self, raw, path, strict=True, **context):
+        if isinstance(raw, integer_types):
+            return raw
 
-        if context.strict:
-            raise UnmarshallingError(self.messages['unmarshal'])
-
-        try:
-            return int(cursor.value)
-        except (TypeError, ValueError):
-            raise UnmarshallingError(self.messages['unmarshal'])
-
-
-class FloatType(AbstractNumberType):
-
-    """Float property type."""
-
-    MESSAGES = {
-        'unmarshal': "Couldn't interpret value as float",
-    }
-
-    __slots__ = []
-
-    def _unmarshal(self, cursor, context):
-        if cursor.is_number:
-            return cursor.value
-
-        if context.strict:
-            raise UnmarshallingError(self.messages['unmarshal'])
+        if strict:
+            raise SchemaError(Error(path, self.messages['type']))
 
         try:
-            return float(cursor.value)
+            return int(raw)
         except (TypeError, ValueError):
-            raise UnmarshallingError(self.messages['unmarshal'])
+            raise SchemaError(Error(path, self.messages['convert']))
 
 
 class BooleanType(AbstractType):
 
-    """Boolean property type."""
+    """Boolean type"""
 
     MESSAGES = {
-        'unmarshal': "Couldn't interpret value as boolean",
+        'type': "Should be a boolean",
+        'convert': "Couldn't convert to a boolean"
     }
 
     __slots__ = []
 
-    def _unmarshal(self, cursor, context):
-        if cursor.is_boolean:
-            return cursor.value
+    def _convert(self, raw, path, strict=True, **context):
+        if isinstance(raw, bool):
+            return raw
 
-        if not context.strict:
-            if cursor.is_string:
-                return bool(strtobool(cursor.value))
-            elif cursor.is_integer and cursor.value in (0, 1):
-                return int == 1
-            elif cursor.is_number:
-                return cursor.value != 0
+        if strict:
+            raise SchemaError(Error(path, self.messages['type']))
 
-        raise UnmarshallingError(self.messages['unmarshal'])
+        if isinstance(raw, string_types):
+            try:
+                return bool(strtobool(raw))
+            except ValueError:
+                pass
+
+        elif isinstance(raw, integer_types + (float, )):
+            return bool(raw)
+
+        raise SchemaError(Error(path, self.messages['convert']))
 
 
 class DateType(AbstractType):
 
-    """Date property type. Convert RFC3339 full-date string into python date object."""
+    """Date type
+
+    Converts RFC3339 full-date string into python date object
+
+    """
 
     MESSAGES = {
-        'unmarshal': "Couldn't interpret value as date",
+        'type': "Should be a string",
+        'convert': "Is not a valid RFC3339 full-date"
     }
 
     __slots__ = []
 
-    def _unmarshal(self, cursor, context):
-        if isinstance(cursor.value, datetime.date):
-            return cursor.value
+    def _convert(self, raw, path, **context):
+        if isinstance(raw, datetime.date):
+            return raw
+
+        if not isinstance(raw, string_types):
+            raise SchemaError(Error(path, self.messages['type']))
 
         try:
-            return datetime.datetime.strptime(cursor.value, '%Y-%m-%d').date()
-        except Exception:
-            raise UnmarshallingError(self.messages['unmarshal'])
+            return datetime.datetime.strptime(raw, '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            raise SchemaError(Error(path, self.messages['convert']))
 
 
 class DateTimeType(AbstractType):
 
-    """Datetime property type. Convert RFC3339 date-time string into python datetime object."""
+    """Datetime type
+
+    Converts RFC3339 date-time string into python datetime object
+
+    """
 
     MESSAGES = {
-        'unmarshal': "Couldn't interpret value as date-time",
+        'type': "Should be a string",
+        'convert': "Is not a valid RFC3339 date-time"
     }
 
     __slots__ = []
 
-    def _unmarshal(self, cursor, context):
-        if isinstance(cursor.value, datetime.datetime):
-            return cursor.value
+    def _convert(self, raw, path, **context):
+        if isinstance(raw, datetime.datetime):
+            return raw
+
+        if not isinstance(raw, string_types):
+            raise SchemaError(Error(path, self.messages['type']))
 
         try:
-            return datetime.datetime.fromtimestamp(
-                strict_rfc3339.rfc3339_to_timestamp(cursor.value))
-        except Exception:
-            raise UnmarshallingError(self.messages['unmarshal'])
+            return datetime.datetime.fromtimestamp(rfc3339_to_timestamp(raw))
+        except (InvalidRFC3339Error, ValueError, TypeError):
+            raise SchemaError(Error(path, self.messages['convert']))
 
 
-class PatternType(StringType):
+class PatternType(AbstractType):
 
-    """Pattern property type."""
-
-    __slots__ = []
-
-    def _unmarshal(self, cursor, context):
-        value = super(PatternType, self)._unmarshal(cursor, context)
-        return re.compile(value)
-
-
-class UrlType(StringType):
-
-    """Url property type."""
+    """Pattern type"""
 
     MESSAGES = {
-        'format': "Is not valid url"
+        'type': "Should be a string",
+        'convert': "Invalid regular expression"
     }
 
     __slots__ = []
 
-    def validate_format(self, value):
+    def _convert(self, raw, path, **context):
+        if not isinstance(raw, string_types):
+            raise SchemaError(Error(path, self.messages['type']))
+
         try:
-            rfc3987.parse(value, rule='URI')
+            return re.compile(raw)
+        except (TypeError, re.error):
+            raise SchemaError(Error(path, self.messages['convert']))
+
+
+class UriType(StringType):
+
+    """Url type"""
+
+    MESSAGES = {
+        'invalid': "Is not a valid URI according to RFC3987"
+    }
+
+    __slots__ = []
+
+    def validate_format(self, converted, raw):
+        try:
+            rfc3987.parse(converted, rule='URI')
         except ValueError:
-            raise ValidationError(self.messages['format'])
+            return self.messages['invalid']
+
+
+EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
 
 
 class EmailType(StringType):
 
-    """Email property type."""
+    """Email type"""
 
     MESSAGES = {
-        'format': "Is not valid email"
+        'invalid': "Is not a valid email"
     }
 
     __slots__ = []
 
-    def validate_format(self, value):
-        if "@" not in value:
-            raise ValidationError(self.messages['format'])
+    def validate_format(self, converted, raw):
+        if not EMAIL_PATTERN.match(converted):
+            return self.messages['invalid']
 
 
 class Int32Type(IntegerType):
 
-    """Int32 property type."""
+    """Int32 type"""
 
     MESSAGES = {
-        'format': "Is not valid int32"
+        'invalid': "Is not a valid int32"
     }
 
     __slots__ = []
 
-    def validate_format(self, value):
-        if value < -2147483648 or value > 2147483647:
-            raise ValidationError(self.messages['format'])
+    def validate_format(self, converted, raw):
+        if converted < -2147483648 or converted > 2147483647:
+            return self.messages['invalid']
 
 
 class Int64Type(IntegerType):
 
-    """Int64 property type."""
+    """Int64 type"""
 
     MESSAGES = {
-        'format': "Is not valid int64"
+        'invalid': "Is not a valid int64"
     }
 
     __slots__ = []
 
-    def validate_format(self, value):
-        if value < -9223372036854775808 or value > 9223372036854775807:
-            raise ValidationError(self.messages['format'])
+    def validate_format(self, converted, raw):
+        if converted < -9223372036854775808 or converted > 9223372036854775807:
+            return self.messages['invalid']
 
 
 UUID_PATTERN = re.compile(
@@ -606,223 +579,178 @@ UUID_PATTERN = re.compile(
 )
 
 
-class UUIDType(StringType):
+class UUIDType(AbstractType):
 
-    """UUID property type."""
+    """UUID type"""
 
     MESSAGES = {
-        'format': "Is not valid UUID"
+        'type': "Should be a string",
+        'invalid': "Is not a valid UUID"
     }
 
     __slots__ = []
 
-    def validate_format(self, value):
-        if not UUID_PATTERN.match(value):
-            raise ValidationError(self.messages['format'])
+    def _convert(self, raw, path, **context):
+        if isinstance(raw, string_types):
+            return raw
+
+        raise SchemaError(Error(path, self.messages['type']))
+
+    def validate_format(self, converted, raw):
+        if not UUID_PATTERN.match(converted):
+            return self.messages['invalid']
 
 
 BASE64_PATTERN = re.compile(r'^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$')
 
 
-class Base64Type(AnyType):
+class Base64Type(AbstractType):
 
-    """Base64 property type."""
+    """Base64 type"""
 
     MESSAGES = {
-        'unmarshal': "Couldn't interpret value as base64 encoded"
+        'type': "Should be a base64 encoded string or a file-like object"
     }
 
     __slots__ = []
 
-    def _unmarshal(self, cursor, context):
-        if isinstance(cursor.value, (Base64DecodableStream, Base64EncodableStream)):
-            return cursor.value
+    def _convert(self, raw, path, **context):
+        if isinstance(raw, (Base64DecodableStream, Base64EncodableStream)):
+            return raw
 
-        value = super(Base64Type, self)._unmarshal(cursor, context)
+        if isinstance(raw, string_types) and BASE64_PATTERN.match(raw):
+            return Base64DecodableStream(StringIO(raw))
 
-        if isinstance(value, string_types) and BASE64_PATTERN.match(value):
-            return Base64DecodableStream(StringIO(value))
-
-        elif is_file_like(value):
-            return Base64DecodableStream(value)
+        elif is_flo(raw):
+            return Base64DecodableStream(raw)
 
         else:
-            raise UnmarshallingError(self.messages['unmarshal'])
+            raise SchemaError(Error(path, self.messages['type']))
 
 
-class FileType(AnyType):
+class BinaryType(AbstractType):
 
-    """File property type."""
+    """Binary type"""
 
     MESSAGES = {
-        'unmarshal': "Couldn't interpret value as file-like object"
+        'type': "Should be a string or a file-like object"
     }
 
     __slots__ = []
 
-    def _unmarshal(self, cursor, context):
-        value = super(FileType, self)._unmarshal(cursor, context)
+    def _convert(self, raw, path, **context):
+        if isinstance(raw, string_types):
+            return StringIO(raw)
 
-        if is_file_like(value):
-            return value
+        elif is_flo(raw):
+            return raw
 
-        else:
-            raise UnmarshallingError(self.messages['unmarshal'])
+        raise SchemaError(Error(path, self.messages['type']))
 
 
 class ArrayType(AbstractType):
 
-    """List or tuple property type.
+    """Array type
 
-    :param item_types: If specified one type then target type of property is list.
-        If specifies several types then target type of property is tuple.
-    :param min_items: Invalidate property when value length less than specified. Default: None.
-    :param max_items: Invalidate property when value length more than specified. Default: None.
-    :param unique_items: Shows that each of the items in an array must be unique. Default: False.
-    :param key: Key defining the primary key of the elements. Used in validating items for uniqueness.
-        Default: None.
-    :param additional_items: Only for tuple validation. Indicates whether the given data
-        can contain additional elements. Default: True.
+    :param item_type: type of items
+    :type item_type: AbstractConvertible
+    :param min_items: invalidate property when value length less than specified
+    :type min_items: int
+    :param max_items: invalidate property when value length more than specified
+    :type max_items: int
+    :param unique_items: shows that each of the items in an array must be unique
+    :type unique_items: bool
+    :param unique_item_properties: allows to check that some properties in array items are unique
+    :type unique_item_properties: list of basestring
     """
 
     MESSAGES = {
-        'unmarshal': "Could't interpret value as a list",
-        'min_items': "List size lower than {0}",
-        'max_items': "List size greater than {0}",
-        'key': "Key improperly appliance",
-        'uniqueness': "List items are not unique",
-        'additional_items': "Additional items are not allowed",
+        'type': "Should be a list or a tuple",
+        'min_items': "Array must have at least {0} items. It had only {1} items",
+        'max_items': "Array must have no more than {0} items. It had {1} items",
+        'unique_items': "Has non-unique items",
+        'unique_item_properties': "All items must be a mapping"
     }
 
     __slots__ = [
-        'item_types',
+        'item_type',
         'min_items',
         'max_items',
         'unique_items',
-        'key',
-        'additional_items'
+        'unique_item_properties'
     ]
 
     def __init__(self,
-                 item_types,
+                 item_type,
                  min_items=None,
                  max_items=None,
                  unique_items=False,
-                 key=None,
-                 additional_items=True,
+                 unique_item_properties=None,
                  **kwargs):
-        assert item_types, "Should be specified one or more item types"
-        if not isinstance(item_types, (tuple, list)):
-            self.item_types = [item_types]
-        else:
-            self.item_types = item_types
-        assert min_items is None or min_items >= 0, "Minimum size MUST be not negative"
-        assert max_items is None or max_items >= min_items or 0, (
-            "Maximum size MUST be equal or greater than minimum size")
+        self.item_type = item_type
         self.min_items = min_items
         self.max_items = max_items
         self.unique_items = unique_items
-        assert key is None or isinstance(key, string_types) or callable(key), (
-            "Key MUST be string or callable")
-        self.key = key
-        self.additional_items = additional_items
+        self.unique_item_properties = unique_item_properties
         super(ArrayType, self).__init__(**kwargs)
 
-    @property
-    def _is_tuple(self):
-        return len(self.item_types) > 1
+    def _convert(self, raw, path, **context):
+        if not isinstance(raw, (list, tuple)):
+            raise SchemaError(Error(path, self.messages['type']))
 
-    def _unmarshal_tuple(self, cursor, context):
-        unmarshalled = []
-        errors = {}
-        for i, (value, property_type) in enumerate(zip(cursor.value, self.item_types)):
-            if property_type is None:
-                unmarshalled.append(value)
-                continue
-
+        result = []
+        errors = []
+        for i, item in enumerate(raw):
             try:
-                with cursor.walk(i):
-                    unmarshalled.append(property_type.unmarshal(
-                        cursor, context=context))
+                result.append(self.item_type.convert(item, path / i, **context))
             except SchemaError as e:
-                errors[i] = e.errors
+                errors.extend(e.errors)
 
         if errors:
-            raise UnmarshallingError(errors)
+            raise SchemaError(*errors)
 
-        return tuple(unmarshalled)
+        return result
 
-    def _unmarshal_array(self, cursor, context):
-        unmarshalled = []
-        errors = {}
-        for i, item in enumerate(cursor.value):
-            try:
-                with cursor.walk(i):
-                    unmarshalled.append(self.item_types[0].unmarshal(
-                        cursor, context=context))
-            except SchemaError as e:
-                errors[i] = e.errors
+    def validate_length(self, converted, raw):
+        length = len(converted)
 
-        if errors:
-            raise UnmarshallingError(errors)
+        if self.min_items is not None and length < self.min_items:
+            return self.messages['min_items'].format(self.min_items, length)
 
-        return unmarshalled
+        if self.max_items is not None and length > self.max_items:
+            return self.messages['max_items'].format(self.max_items, length)
 
-    def _unmarshal(self, cursor, context):
-        if not cursor.is_array:
-            raise UnmarshallingError(self.messages['unmarshal'])
-
-        if self._is_tuple:
-            return self._unmarshal_tuple(cursor, context)
-        else:
-            return self._unmarshal_array(cursor, context)
-
-    def validate_size(self, value):
-        if self._is_tuple:
+    def validate_uniqueness(self, converted, raw):
+        if not self.unique_items:
             return
 
-        if self.min_items is not None and len(value) < self.min_items:
-            raise ValidationError(self.messages['min_items'].format(self.min_items))
+        items = converted
+        if self.unique_item_properties:
+            if not all(isinstance(item, Mapping) for item in converted):
+                return self.messages['unique_item_properties']
 
-        if self.max_items is not None and len(value) > self.max_items:
-            raise ValidationError(self.messages['max_items'].format(self.max_items))
+            items = [tuple(item.get(k) for k in self.unique_item_properties) for item in converted]
 
-    def validate_uniqueness(self, value):
-        if self.unique_items and not self._is_tuple:
-            items = value
-            if self.key is not None:
-                try:
-                    if isinstance(self.key, string_types):
-                        items = [item.get(self.key) for item in value]
-                    else:
-                        items = [self.key(item) for item in value]
-                except (KeyError, IndexError, AttributeError):
-                    raise ValidationError(self.messages['key'])
-
-            if not uniq(items):
-                raise ValidationError(self.messages['uniqueness'])
-
-    def validate_additional_items(self, value):
-        if self._is_tuple:
-            if len(value) > len(self.item_types):
-                raise ValidationError(self.messages['additional_items'])
+        if not uniq(items):
+            return self.messages['unique_items']
 
 
-class DictType(AbstractType):
+class MapType(AbstractType):
 
-    """Dictionary property type.
+    """Map type
 
-    :param value_type: Type of dictionary values.
-    :param min_values: Invalidate dictionary when number of values less than specified.
-        Default: None.
-    :param max_values: Invalidate dictionary when number of values more than specified.
-        Default: None.
+    :param value_type: type of map values
+    :type value_type: AbstractConvertible
+    :param min_values: invalidate dictionary when number of values less than specified
+    :type min_values: int
+    :param max_values: invalidate dictionary when number of values more than specified
+    :type max_values: int
     """
 
     MESSAGES = {
-        'unmarshal': "Could't interpret value as a dict",
-        'min_values': "Dictionary does not have enough values",
-        'max_values': "Dictionary has too many values"
+        'type': "Should be a mapping",
+        'min_values': "Map must have at least {0} values. It had only {1} values",
+        'max_values': "Map must have no more than {0} values. It had {1} values",
     }
 
     __slots__ = [
@@ -835,233 +763,225 @@ class DictType(AbstractType):
         self.value_type = value_type
         self.min_values = min_values
         self.max_values = max_values
-        super(DictType, self).__init__(**kwargs)
+        super(MapType, self).__init__(**kwargs)
 
-    def _unmarshal(self, cursor, context):
-        if not cursor.is_mapping:
-            raise UnmarshallingError(self.messages['unmarshal'])
+    def _convert(self, raw, path, **context):
+        if not isinstance(raw, Mapping):
+            raise SchemaError(Error(path, self.messages['type']))
 
-        unmarshalled = {}
-        errors = {}
-        for k, v in iteritems(cursor.value):
+        result = {}
+        errors = []
+        for key, value in sorted(iteritems(raw)):
             try:
-                with cursor.walk(k):
-                    unmarshalled[k] = self.value_type.unmarshal(
-                        cursor, context=context)
+                result[key] = self.value_type.convert(value, path / key, **context)
             except SchemaError as e:
-                errors[k] = e.errors
+                errors.extend(e.errors)
 
         if errors:
-            raise UnmarshallingError(errors)
+            raise SchemaError(*errors)
 
-        return unmarshalled
+        return result
 
-    def validate_values(self, value):
-        values_count = len(value)
+    def validate_length(self, converted, raw):
+        length = len(converted)
 
-        if self.min_values is not None and values_count < self.min_values:
-            raise ValidationError(self.messages['min_values'])
+        if self.min_values is not None and length < self.min_values:
+            return self.messages['min_values'].format(self.min_values, length)
 
-        if self.max_values is not None and values_count > self.max_values:
-            raise ValidationError(self.messages['max_values'])
+        if self.max_values is not None and length > self.max_values:
+            return self.messages['max_values'].format(self.max_values, length)
 
 
-class Discriminator(object):
+class DiscriminatorType(AbstractType):
 
+    """Discriminator type
+
+    :param property_name: property name that decides target type
+    :type property_name: basestring
+    :param mapping: mapping of extracted values to target types
+    :type mapping: dict[basestring, AbstractConvertible]
     """
-    The discriminator object.
-    Serves for unambiguous determination of the target property type.
 
-    :param property_name: Property name that decides target type.
-    :param mapping: Mapping of extracted values to target types.
-    """
+    MESSAGES = {
+        'type': "Should be a mapping",
+        'not_present': "A property with name '{0}' must be present",
+        'not_match': "The discriminator value should be equal to one of the following values: {0}"
+    }
 
     __slots__ = [
         'property_name',
         'mapping'
     ]
 
-    def __init__(self, property_name, mapping=None):
+    def __init__(self, property_name, mapping, **kwargs):
         self.property_name = property_name
         self.mapping = mapping
+        super(DiscriminatorType, self).__init__(**kwargs)
 
-    def match(self, property_types, cursor):
-        if not cursor.is_mapping:
-            raise DiscriminatorError(
-                "Value MUST be a mapping if discriminator specified")
+    def _convert(self, raw, path, **context):
+        if not isinstance(raw, Mapping):
+            raise SchemaError(Error(path, self.messages['type']))
 
-        property_value = None
-        with cursor.walk(self.property_name, Undefined):
-            if cursor.is_undefined:
-                raise DiscriminatorError(
-                    "Could't discriminate type. "
-                    "Property with name `{}` not found".format(
-                        self.property_name))
+        if self.property_name not in raw:
+            raise SchemaError(Error(path, self.messages['not_present'].format(self.property_name)))
 
-            try:
-                property_value = text_type(cursor.value)
-            except (ValueError, TypeError):
-                raise DiscriminatorError(
-                    "Discriminator value cannot cast to string")
+        matched_type = self.mapping.get(raw[self.property_name])
 
-        matched_property_type = None
-        if self.mapping is not None:
-            matched_property_type = self.mapping.get(property_value)
+        if matched_type is None:
+            raise SchemaError(
+                Error(path, self.messages['not_match'].format(', '.join(sorted(map(str, iterkeys(self.mapping)))))))
 
-        if matched_property_type is None:
-            for property_type in property_types:
-                if isinstance(property_type, ObjectType) and property_type.schema.name == property_value:
-                    matched_property_type = property_type
-                    break
-
-        if matched_property_type is None:
-            raise DiscriminatorError("No one of property types are "
-                                     "not matched to discriminator value")
-
-        return matched_property_type
+        return matched_type.convert(raw, path, **context)
 
 
 class AllOfType(AbstractType):
 
-    """The given data must be valid against all of the given subschemas.
+    """AllOf type
 
-    :param property_types: Types for which the given data must be valid.
+    The given data must be valid against all of the given subschemas
+
+    :param subtypes: types for which the given data must be valid
+    :type subtypes: list of AbstractConvertible
     """
 
+    MESSAGES = {
+        'not_all': "Does not match all schemas from `allOf`. Invalid schema indexes: {0}"
+    }
+
     __slots__ = [
-        'property_types'
+        'subtypes'
     ]
 
-    def __init__(self, property_types, **kwargs):
-        self.property_types = property_types
+    def __init__(self, subtypes, **kwargs):
+        self.subtypes = subtypes
         super(AllOfType, self).__init__(**kwargs)
 
-    def _unmarshal(self, cursor, context):
+    def _convert(self, raw, path, **context):
         matched = []
+        not_matched_indexes = []
         errors = []
-        for i, property_type in enumerate(self.property_types):
-            assert isinstance(property_type, AbstractType)
+        for i, subtype in enumerate(self.subtypes):
             try:
-                with cursor.in_scope(i):
-                    matched.append(property_type.unmarshal(
-                        cursor, context=context))
+                matched.append(subtype.convert(raw, path / i, **context))
             except SchemaError as e:
-                errors.append(e.errors)
+                errors.extend(e.errors)
+                not_matched_indexes.append(i)
                 continue
 
         if errors:
-            raise PolymorphicError({'__all__': errors})
+            raise SchemaError(
+                Error(path, self.messages['not_all'].format(', '.join(sorted(map(str, not_matched_indexes))))), *errors)
 
         if all(isinstance(value, Mapping) for value in matched):
-            matched.insert(0, Object(cursor.url))
+            matched.insert(0, Object())
             return reduce(operator.or_, matched)
+
+        if all(isinstance(value, (list, tuple)) for value in matched):
+            result = []
+            for squashed in zip(matched):
+                if all(isinstance(value, Mapping) for value in squashed):
+                    result.append(reduce(operator.or_, (Object(), ) + squashed))
+                else:
+                    result.append(squashed[-1])
+            return result
 
         return matched[-1]
 
 
 class AnyOfType(AbstractType):
 
-    """The given data must be valid against any (one or more) of the given subschemas.
+    """AnyOf type
 
-    :param property_types: Types for which the given data must be valid.
-    :param discriminator: Discriminator object.
+    The given data must be valid against any (one or more) of the given subschemas
+
+    :param subtypes: types for which the given data must be valid
+    :type subtypes: list of AbstractConvertible
     """
 
+    MESSAGES = {
+        'not_any': "Does not match any schemas from `anyOf`"
+    }
+
     __slots__ = [
-        'property_types',
-        'discriminator'
+        'subtypes'
     ]
 
-    def __init__(self, property_types, discriminator=None, **kwargs):
-        self.property_types = property_types
-        assert discriminator is None or isinstance(discriminator, Discriminator), (
-            "Invalid discriminator object")
-        self.discriminator = discriminator
+    def __init__(self, subtypes, **kwargs):
+        self.subtypes = subtypes
         super(AnyOfType, self).__init__(**kwargs)
 
-    def _unmarshal(self, cursor, context):
-        if self.discriminator is None:
-            matched = []
-            errors = []
-            for i, candidate in enumerate(self.property_types):
-                assert isinstance(candidate, AbstractType)
-                try:
-                    with cursor.in_scope(i):
-                        matched.append(candidate.unmarshal(
-                            cursor, context=context))
-                except SchemaError as e:
-                    errors.append(e.errors)
-                    continue
+    def _convert(self, raw, path, **context):
+        matched = []
+        errors = []
+        for i, subtype in enumerate(self.subtypes):
+            try:
+                matched.append(subtype.convert(raw, path / i, **context))
+            except SchemaError as e:
+                errors.extend(e.errors)
+                continue
 
-            if not matched:
-                raise PolymorphicError({'__any__': errors})
+        if not matched:
+            raise SchemaError(Error(path, self.messages['not_any']), *errors)
 
-            if all(isinstance(value, Mapping) for value in matched):
-                matched.append(Object(cursor.url))
-                return reduce(operator.or_, reversed(matched))
+        if all(isinstance(value, Mapping) for value in matched):
+            matched.append(Object())
+            return reduce(operator.or_, reversed(matched))
 
-            return matched[0]
-        else:
-            candidate = self.discriminator.match(self.property_types, cursor)
-            assert isinstance(candidate, AbstractType)
-            return candidate.unmarshal(cursor, context=context)
+        return matched[0]
 
 
 class OneOfType(AbstractType):
 
-    """The given data must be valid against exactly one of the given subschemas.
+    """OneOf type
 
-    :param property_types: Types for which the given data must be valid.
-    :param discriminator: Discriminator object.
+    The given data must be valid against exactly one of the given subschemas
+
+    :param subtypes: types for which the given data must be valid
+    :type subtypes: list of AbstractConvertible
     """
 
     MESSAGES = {
-        'ambiguous': "Ambiguous data"
+        'no_one': "Is valid against no schemas from `oneOf`",
+        'ambiguous': "Is valid against more than one schema from `oneOf`. Valid schema indexes: {0}"
     }
 
     __slots__ = [
-        'property_types',
-        'discriminator'
+        'subtypes'
     ]
 
-    def __init__(self, property_types, discriminator=None, **kwargs):
-        self.property_types = property_types
-        assert discriminator is None or isinstance(discriminator, Discriminator), (
-            "Invalid discriminator object")
-        self.discriminator = discriminator
+    def __init__(self, subtypes, **kwargs):
+        self.subtypes = subtypes
         super(OneOfType, self).__init__(**kwargs)
 
-    def _unmarshal(self, cursor, context):
-        if self.discriminator is None:
-            matched = []
-            errors = []
-            for i, candidate in enumerate(self.property_types):
-                assert isinstance(candidate, AbstractType)
-                try:
-                    with cursor.in_scope(i):
-                        matched.append(candidate.unmarshal(
-                            cursor, context=context))
-                except SchemaError as e:
-                    errors.append(e.errors)
-                    continue
+    def _convert(self, raw, path, **context):
+        matched = []
+        matched_indexes = []
+        errors = []
+        for i, subtype in enumerate(self.subtypes):
+            try:
+                matched.append(subtype.convert(raw, path / i, **context))
+                matched_indexes.append(i)
+            except SchemaError as e:
+                errors.extend(e.errors)
 
-            if not matched:
-                raise PolymorphicError({'__one__': errors})
-            elif len(matched) > 1:
-                raise PolymorphicError(self.messages['ambiguous'])
+        if not matched:
+            raise SchemaError(Error(path, self.messages['no_one']), *errors)
 
-            return matched[0]
-        else:
-            candidate = self.discriminator.match(self.property_types, cursor)
-            assert isinstance(candidate, AbstractType)
-            return candidate.unmarshal(cursor, context=context)
+        elif len(matched) > 1:
+            raise SchemaError(
+                Error(path, self.messages['ambiguous'].format(', '.join(sorted(map(str, matched_indexes))))))
+
+        return matched[0]
 
 
 class NotType(AbstractType):
 
-    """Declares that a instance validates if it doesn't validate against the given subschemas.
+    """Not type
 
-    :param property_types: Types for which the given data must not be valid.
+    Declares that a instance validates if it doesn't validate against the given subschemas
+
+    :param subtypes: types for which the given data must not be valid
+    :type subtype: list of AbstractConvertible
     """
 
     MESSAGES = {
@@ -1069,276 +989,230 @@ class NotType(AbstractType):
     }
 
     __slots__ = [
-        'property_types'
+        'subtypes'
     ]
 
-    def __init__(self, property_types, **kwargs):
-        self.property_types = property_types
+    def __init__(self, subtypes, **kwargs):
+        self.subtypes = subtypes
         super(NotType, self).__init__(**kwargs)
 
-    def _unmarshal(self, cursor, context):
-        for i, property_type in enumerate(self.property_types):
-            assert isinstance(property_type, AbstractType)
+    def _convert(self, raw, path, **context):
+        for i, subtype in enumerate(self.subtypes):
             try:
-                with cursor.in_scope(i):
-                    property_type.unmarshal(cursor, context=context)
+                subtype.convert(raw, path / i, **context)
             except SchemaError:
                 pass
             else:
-                raise PolymorphicError(self.messages['not_acceptable'])
+                raise SchemaError(Error(path, self.messages['not_acceptable']))
 
-        return cursor.value
-
-
-class Schema(object):
-
-    """Schema of object.
-
-    :param name: Schema name.
-    :type name: basestring
-    :param bases: Base schemas.
-    :type bases: tuple | list | `Schema`
-    :param properties: Dictionary of property names and corresponding types.
-    :type properties: dict
-    :param pattern_properties: The correspondence of regular expressions
-        with the corresponding types
-    :type pattern_properties: tuple | list
-    :param additional_properties: Defines additional properties.
-        If True then possible any additional properties, that not explicitly describes.
-        If False then additional properties not allowed.
-        If the property type is specified then additional properties of this type are allowed.
-    :type additional_properties: bool | `AbstractType`
-    :param validators: Dictionary of validators of properties that depends on others.
-    :type validators: dict of callable
-    :param defaults: Dictionary of callable objects that provides default values of properties
-        that depends on others.
-    :type defaults: dict of callable
-    """
-
-    __slots__ = [
-        'name',
-        'properties',
-        'additional_properties',
-        'pattern_properties',
-        'validators',
-        'defaults'
-    ]
-
-    def __init__(self, name, bases=None,
-                 properties=None, pattern_properties=None, additional_properties=None,
-                 validators=None, defaults=None):
-        self.name = name
-
-        if bases is not None and not isinstance(bases, (tuple, list)):
-            bases = (bases, )
-
-        self.properties = OrderedDict()
-        self.pattern_properties = None
-        self.additional_properties = True
-        self.validators = OrderedDict()
-        self.defaults = OrderedDict()
-
-        if bases:
-            for base in reversed(bases):
-                self.properties.update(base.properties)
-                if base.pattern_properties is not None:
-                    self.pattern_properties = base.pattern_properties
-                self.additional_properties = base.additional_properties
-                self.validators.update(base.validators)
-                self.defaults.update(base.defaults)
-
-        if properties is not None:
-            self.properties.update(properties)
-
-        if pattern_properties is not None:
-            self.pattern_properties = pattern_properties
-
-        if additional_properties is not None:
-            self.additional_properties = additional_properties
-
-        if validators is not None:
-            self.validators.update(validators)
-
-        if defaults is not None:
-            self.defaults.update(defaults)
+        return raw
 
 
-class Pass(BaseException):
+class ObjectTypeMeta(TypeMeta):
 
-    """Object for passing value through call stack.
+    def __new__(mcs, name, bases, attrs):
+        properties = {}
+        required = set()
+        pattern_properties = {}
+        additional_properties = True
 
-    :param value: Passed value.
-    """
+        for base in reversed(bases):
+            if hasattr(base, 'PROPERTIES'):
+                properties.update(base.PROPERTIES)
 
-    def __init__(self, value):
-        self.value = value
+            if hasattr(base, 'REQUIRED'):
+                required.update(base.REQUIRED)
+
+            if hasattr(base, 'PATTERN_PROPERTIES'):
+                pattern_properties.update(base.PATTERN_PROPERTIES)
+
+            if hasattr(base, 'ADDITIONAL_PROPERTIES'):
+                additional_properties = base.ADDITIONAL_PROPERTIES
+
+        if 'PROPERTIES' in attrs:
+            properties.update(attrs['PROPERTIES'])
+
+        if 'REQUIRED' in attrs:
+            required.update(attrs['REQUIRED'])
+
+        if 'PATTERN_PROPERTIES' in attrs:
+            pattern_properties.update(attrs['PATTERN_PROPERTIES'])
+
+        if 'ADDITIONAL_PROPERTIES' in attrs:
+            additional_properties = attrs['ADDITIONAL_PROPERTIES']
+
+        klass = TypeMeta.__new__(mcs, name, bases, attrs)
+
+        klass.PROPERTIES = properties
+        klass.REQUIRED = required
+        klass.PATTERN_PROPERTIES = pattern_properties
+        klass.ADDITIONAL_PROPERTIES = additional_properties
+
+        return klass
 
 
-class ObjectType(AbstractType):
+class ObjectType(with_metaclass(ObjectTypeMeta, AbstractType)):
 
-    """Object property type.
+    """Object type
 
-    :param schema: Schema object or callable that returns schema object.
-    :param allow_reference: If True then references are allowed. Default: False.
-    :param min_properties: Invalidate object when number of properties less than specified.
-        Default: None.
-    :param max_properties: Invalidate object when number of properties more than specified.
-        Default: None.
+    :param properties: is a dictionary, where each key is the name of a property and each value
+        is a type used to validate that property
+    :type properties: dict[basestring, AbstractType]
+    :param required: by default, the properties defined by the `properties` are not required.
+        However, one can provide a list of required properties using the `required`. The `required`
+        takes an array of one or more strings
+    :type required: tuple | list | set
+    :param pattern_properties: it is map from regular expressions to types. If an additional
+        property matches a given regular expression, it must also validate against the
+        corresponding type
+    :type pattern_properties: dict[re._pattern_type, AbstractType]
+    :param additional_properties: is used to control the handling of extra stuff, that is,
+        properties whose names are not listed in the properties. If is `True` then possible
+        any additional properties, that not listed in `properties`. If is `False` then
+        additional properties not allowed. If is a `AbstractType` then additional properties
+        of this type are allowed. By default any additional properties are allowed
+    :type additional_properties: bool | AbstractType
+    :param min_properties: invalidate object when number of properties less than specified
+    :param max_properties: invalidate object when number of properties more than specified
     """
 
     MESSAGES = {
-        'unmarshal': "Could't interpret value as a object",
-        'additional_properties': "Unexpected additional property",
-        'min_properties': "Object does not have enough properties",
-        'max_properties': "Object has too many properties"
+        'type': "Should be a mapping",
+        'required': "The following required properties are missed: {0}",
+        'extra_properties': (
+            "No unspecified properties are allowed."
+            " The following unspecified properties were found: {0}"
+        ),
+        'min_properties': "Object must have at least {0} properties. It had only {1} properties",
+        'max_properties': "Object must have no more than {0} properties. It had {1} properties",
     }
 
     __slots__ = [
-        '_schema',
+        'properties',
+        'required',
+        'pattern_properties',
+        'additional_properties',
         'min_properties',
         'max_properties'
     ]
 
-    def __init__(self, schema, min_properties=None, max_properties=None, **kwargs):
-        self._schema = schema
+    def __init__(self,
+                 properties=None,
+                 required=None,
+                 pattern_properties=None,
+                 additional_properties=None,
+                 min_properties=None,
+                 max_properties=None,
+                 **kwargs):
+        self.properties = dict(self.PROPERTIES, **(properties or {}))
+        self.required = set.union(self.REQUIRED, set(required or []))
+        self.pattern_properties = dict(self.PATTERN_PROPERTIES, **(pattern_properties or {}))
+
+        self.additional_properties = self.ADDITIONAL_PROPERTIES
+        if additional_properties is not None:
+            self.additional_properties = additional_properties
+
         self.min_properties = min_properties
         self.max_properties = max_properties
         super(ObjectType, self).__init__(**kwargs)
 
-    @property
-    def schema(self):
-        if callable(self._schema):
-            self._schema = self._schema()
-        return self._schema
+    def _convert(self, raw, path, **context):
+        if not isinstance(raw, Mapping):
+            raise SchemaError(Error(path, self.messages['type']))
 
-    def unmarshal(self, cursor, context=None):
-        try:
-            return super(ObjectType, self).unmarshal(cursor, context=context)
-        except Pass as e:
-            return e.value
+        errors = []
+        result = Object()
 
-    def _unmarshalling(self, instance, cursor, context):
-        if not cursor.is_mapping:
-            raise SchemaError(self.messages['unmarshal'])
+        missed_properties = []
+        for required_property in self.required:
+            if required_property not in raw:
+                missed_properties.append(required_property)
 
-        errors = {}
+        if missed_properties:
+            errors.append(Error(path, self.messages['required'].format(', '.join(sorted(missed_properties)))))
 
-        rogue_props = set(cursor.value) - set(self.schema.properties)
+        extra_properties = set(raw) - set(self.properties)
         matched = []
-        for rogue_prop in rogue_props:
-            if self.schema.pattern_properties is not None:
-                for pattern, prop in self.schema.pattern_properties:
-                    if pattern.match(str(rogue_prop)):
-                        matched.append(rogue_prop)
-                        try:
-                            with cursor.walk(rogue_prop):
-                                instance.pattern_properties[rogue_prop] = prop.unmarshal(
-                                    cursor, context=context)
-                        except SchemaError as e:
-                            errors[rogue_prop] = e.errors
+        for extra_property in extra_properties:
+            for pattern, prop in iteritems(self.pattern_properties):
+                if pattern.match(extra_property):
+                    matched.append(extra_property)
+                    try:
+                        result.pattern_properties[extra_property] = prop.convert(
+                            raw[extra_property], path / extra_property, **context)
+                    except SchemaError as e:
+                        errors.extend(e.errors)
 
-                        break
+                    break
 
-            if rogue_prop in matched:
+            if extra_property in matched:
                 continue
 
-            if self.schema.additional_properties is True:
-                with cursor.walk(rogue_prop):
-                    instance.additional_properties[rogue_prop] = cursor.value
+            if self.additional_properties is True:
+                result.additional_properties[extra_property] = raw[extra_property]
 
-                matched.append(rogue_prop)
+                matched.append(extra_property)
 
-            elif isinstance(self.schema.additional_properties, AbstractType):
+            elif isinstance(self.additional_properties, AbstractConvertible):
                 try:
-                    with cursor.walk(rogue_prop):
-                        instance.additional_properties[rogue_prop] = self.schema.additional_properties.unmarshal(
-                            cursor, context=context)
-                except SchemaError:
+                    result.additional_properties[extra_property] = self.additional_properties.convert(
+                        raw[extra_property], path / extra_property, **context)
+                except SchemaError as e:
+                    errors.extend(e.errors)
+                else:
+                    matched.append(extra_property)
+
+        extra_properties = extra_properties - set(matched)
+        if extra_properties:
+            errors.append(
+                Error(path, self.messages['extra_properties'].format(', '.join(sorted(extra_properties)))))
+
+        for prop_name, prop in iteritems(self.properties):
+            try:
+                if prop_name not in raw and prop_name in self.required:
                     continue
 
-                matched.append(rogue_prop)
+                converted = prop.convert(raw.get(prop_name, Undefined), path / prop_name, **context)
 
-        rogue_props = rogue_props - set(matched)
-        if rogue_props:
-            errors.update({
-                rogue_prop: self.messages['additional_properties'] for rogue_prop in rogue_props
-            })
+                if converted is not Undefined:
+                    result.properties[prop_name] = converted
 
-        for prop_name, prop in iteritems(self.schema.properties):
-            try:
-                with cursor.walk(prop_name):
-                    unmarshalled = prop.unmarshal(cursor, context=context)
             except SchemaError as e:
-                errors[prop_name] = e.errors
+                errors.extend(e.errors)
                 continue
 
-            if unmarshalled is Undefined:
-                continue
-
-            instance.properties[prop_name] = unmarshalled
-
         if errors:
-            raise UnmarshallingError(errors)
+            raise SchemaError(*errors)
 
-    def _unmarshal(self, cursor, context):
-        instance = context.registry.get(cursor.url)
+        return result
 
-        if instance is not None:
-            raise Pass(weakref.proxy(instance))
+    def validate_length(self, converted, raw):
+        length = len(raw)
 
-        instance = Object(cursor.url)
-        context.registry[cursor.url] = instance
-        self._unmarshalling(instance, cursor, context)
-        self._set_defaults(instance, cursor)
+        if self.min_properties is not None and length < self.min_properties:
+            return self.messages['min_properties'].format(self.min_properties, length)
 
-        return instance
-
-    def _set_defaults(self, instance, cursor):
-        for prop_name, func in iteritems(self.schema.defaults):
-            if prop_name not in instance.properties:
-                default = func(cursor.value, instance)
-                if default is not Undefined:
-                    instance.properties[prop_name] = default
-
-    def validate_properties(self, value):
-        properties_count = len(value)
-
-        if self.min_properties is not None and properties_count < self.min_properties:
-            raise ValidationError(self.messages['min_properties'])
-
-        if self.max_properties is not None and properties_count > self.max_properties:
-            raise ValidationError(self.messages['max_properties'])
-
-    def _validate(self, value):
-        errors = {}
-        for prop_name, validator in iteritems(self.schema.validators):
-            try:
-                validator(value)
-            except ValidationError as e:
-                errors.update({prop_name: e.errors})
-        if errors:
-            raise ValidationError(errors)
-
-        return super(ObjectType, self)._validate(value)
+        if self.max_properties is not None and length > self.max_properties:
+            return self.messages['max_properties'].format(self.max_properties, length)
 
 
-class ObjectOrReferenceType(ObjectType):
+class LazyType(AbstractConvertible):
 
-    """Object or reference property type. This type allows references
-    on objects or another references.
+    """Lazy type
 
+    Resolves target type when it needed
+
+    :param resolver: callable for lazy resolving of target type
+    :type resolver: callable
     """
 
-    __slots__ = []
+    def __init__(self, resolver, **kwargs):
+        self.resolver = resolver
+        super(LazyType, self).__init__(**kwargs)
 
-    def _unmarshal(self, cursor, context):
-        ref = None
-        if cursor.is_ref:
-            ref = cursor.value['$ref']
+    @cached_property
+    def resolved(self):
+        return self.resolver()
 
-        if ref is not None:
-            with cursor.walk_ref(ref):
-                return self._unmarshal(cursor, context)
-
-        else:
-            return super(ObjectOrReferenceType, self)._unmarshal(cursor, context)
+    def convert(self, raw, path, **context):
+        return self.resolved.convert(raw, path, **context)

@@ -1,13 +1,15 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
 
 
-Callback = types.Schema(
-    name='Callback',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=types.ObjectType(lambda: PathItem)
-)
+class CallbackObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    ADDITIONAL_PROPERTIES = types.LazyType(lambda: PathItemObjectType())
 
 
-from .path_item import PathItem  # noqa
+from .path_item import PathItemObjectType  # noqa

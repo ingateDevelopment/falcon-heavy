@@ -1,20 +1,26 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .contact import Contact
-from .license import License
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
+from .contact import ContactObjectType
+from .license import LicenseObjectType
 
 
-Info = types.Schema(
-    name='Info',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'title': types.StringType(required=True),
+class InfoObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'title': types.StringType(),
         'description': types.StringType(),
-        'termsOfService': types.UrlType(),
-        'contact': types.ObjectType(Contact),
-        'license': types.ObjectType(License),
-        'version': types.StringType(required=True)
+        'termsOfService': types.UriType(),
+        'contact': ContactObjectType(),
+        'license': LicenseObjectType(),
+        'version': types.StringType()
     }
-)
+
+    REQUIRED = {
+        'title',
+        'version'
+    }

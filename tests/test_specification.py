@@ -1,47 +1,62 @@
 from __future__ import unicode_literals, print_function
 
+import warnings
 import unittest
 
-from falcon_heavy.schema.exceptions import SchemaError
-from falcon_heavy.schema.types import Object
-from falcon_heavy.openapi import (
-    Info,
-    Contact,
-    License,
-    Server,
-    Components,
-    Operation,
-    PathItem,
-    ExternalDocumentation,
-    HeaderParameter,
-    QueryParameter,
-    PathParameter,
-    RequestBody,
-    MediaType,
-    Response,
-    Tag,
-    Schema
+from hic_falcon_heavy.schema import exceptions, ref_resolver, path
+from hic_falcon_heavy.openapi import (
+    InfoObjectType,
+    ContactObjectType,
+    LicenseObjectType,
+    ServerObjectType,
+    ComponentsObjectType,
+    PathItemObjectType,
+    OperationObjectType,
+    ExternalDocumentationObjectType,
+    HeaderParameterObjectType,
+    PathParameterObjectType,
+    QueryParameterObjectType,
+    RequestBodyObjectType,
+    MediaTypeObjectType,
+    ResponsesObjectType,
+    ResponseObjectType,
+    TagObjectType,
+    SchemaObjectType
 )
 
 
 class SchemaTest(unittest.TestCase):
 
-    def _validate_data(self, data, schema):
+    def _valid(self, object_type, payload):
         try:
-            Object.from_raw(schema, data)
-        except SchemaError as e:
-            self.fail(str(e))
+            converted = object_type().convert(
+                payload,
+                path.Path('#'),
+                ref_resolver=ref_resolver.RefResolver('#', payload),
+                registry={}
+            )
+        except exceptions.SchemaError as e:
+            self.fail(e)
 
-    def _must_failed(self, data, schema, errors=None):
+        return converted
+
+    def _invalid(self, object_type, payload, expected_errors=None):
         try:
-            Object.from_raw(schema, data)
-        except SchemaError as e:
-            self.assertEqual(e.errors, errors)
+            object_type().convert(
+                payload,
+                path.Path('#'),
+                ref_resolver=ref_resolver.RefResolver('#', payload),
+                registry={}
+            )
+        except exceptions.SchemaError as e:
+            if expected_errors is not None:
+                actual_errors = {error.path: error.message for error in e.errors}
+                self.assertEqual(expected_errors, actual_errors)
         else:
             self.fail()
 
-    def test_info(self):
-        data = {
+    def test_valid_info(self):
+        self._valid(InfoObjectType, {
             "title": "Sample Pet Store App",
             "description": "This is a sample server for a pet store.",
             "termsOfService": "http://example.com/terms/",
@@ -55,26 +70,23 @@ class SchemaTest(unittest.TestCase):
                 "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
             },
             "version": "1.0.1"
-        }
-        self._validate_data(data, Info)
+        })
 
-    def test_contact(self):
-        data = {
+    def test_valid_contact(self):
+        self._valid(ContactObjectType, {
             "name": "API Support",
             "url": "http://www.example.com/support",
             "email": "support@example.com"
-        }
-        self._validate_data(data, Contact)
+        })
 
-    def test_license(self):
-        data = {
+    def test_valid_license(self):
+        self._valid(LicenseObjectType, {
             "name": "Apache 2.0",
             "url": "https://www.apache.org/licenses/LICENSE-2.0.html"
-        }
-        self._validate_data(data, License)
+        })
 
-    def test_server(self):
-        data = {
+    def test_valid_server(self):
+        self._valid(ServerObjectType, {
             "url": "https://{username}.gigantic-server.com:{port}/{basePath}",
             "description": "The production API server",
             "variables": {
@@ -94,11 +106,10 @@ class SchemaTest(unittest.TestCase):
                     "default": "v2"
                 }
             }
-        }
-        self._validate_data(data, Server)
+        })
 
-    def test_components(self):
-        data = {
+    def test_valid_components(self):
+        self._valid(ComponentsObjectType, {
             "schemas": {
                 "GeneralError": {
                     "type": "string"
@@ -188,11 +199,25 @@ class SchemaTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        self._validate_data(data, Components)
+        })
 
-    def test_path_item(self):
-        data = {
+    def test_invalid_component_names(self):
+        self._invalid(
+            ComponentsObjectType,
+            {
+                "schemas": {
+                    "%Error": {
+                        "type": "string"
+                    }
+                }
+            },
+            expected_errors={
+                "#/schemas": "The following component names are invalid: %Error"
+            }
+        )
+
+    def test_valid_path_item(self):
+        self._valid(PathItemObjectType, {
             "x-schemas": {
                 "Pet": {
                     "type": "string"
@@ -217,11 +242,25 @@ class SchemaTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        self._validate_data(data, PathItem)
+        })
 
-    def test_operation(self):
-        data = {
+    def test_deprecated_operation(self):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            self._valid(OperationObjectType, {
+                "responses": {
+                    "200": {
+                        "description": "Successful"
+                    }
+                },
+                "deprecated": True,
+            })
+            self.assertEqual(len(w), 1)
+            self.assertTrue(issubclass(w[-1].category, DeprecationWarning))
+            self.assertTrue("deprecated" in str(w[-1].message))
+
+    def test_valid_operation(self):
+        self._valid(OperationObjectType, {
             "tags": [
                 "pet"
             ],
@@ -284,21 +323,31 @@ class SchemaTest(unittest.TestCase):
                     ]
                 }
             ]
-        }
-        self._validate_data(data, Operation)
+        })
 
-    def test_external_documentation(self):
-        data = {
+    def test_valid_external_documentation(self):
+        self._valid(ExternalDocumentationObjectType, {
             "description": "Find more info here",
             "url": "https://example.com"
-        }
-        self._validate_data(data, ExternalDocumentation)
+        })
 
-    def test_parameter(self):
-        # A header parameter with an array of 64 bit integer numbers
-        data = {
+    def test_deprecated_parameter(self):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            self._valid(HeaderParameterObjectType, {
+                "name": "token",
+                "in": "header",
+                "deprecated": True,
+            })
+            self.assertEqual(len(w), 1)
+            self.assertTrue(issubclass(w[-1].category, DeprecationWarning))
+            self.assertTrue("deprecated" in str(w[-1].message))
+
+    def test_valid_header_parameter(self):
+        self._valid(HeaderParameterObjectType, {
             "name": "token",
             "in": "header",
+            "deprecated": True,
             "description": "token to be passed as a header",
             "required": True,
             "schema": {
@@ -310,11 +359,10 @@ class SchemaTest(unittest.TestCase):
             },
             "style": "simple",
             "x-property": "property"
-        }
-        self._validate_data(data, HeaderParameter)
+        })
 
-        # A path parameter of a string value
-        data = {
+    def test_valid_path_parameter(self):
+        self._valid(PathParameterObjectType, {
             "name": "username",
             "in": "path",
             "description": "username to fetch",
@@ -322,11 +370,10 @@ class SchemaTest(unittest.TestCase):
             "schema": {
                 "type": "string"
             }
-        }
-        self._validate_data(data, PathParameter)
+        })
 
-        # An optional query parameter of a string value, allowing multiple values by repeating the query parameter
-        data = {
+    def test_valid_query_parameter(self):
+        self._valid(QueryParameterObjectType, {
             "name": "id",
             "in": "query",
             "description": "ID of the object to fetch",
@@ -339,25 +386,10 @@ class SchemaTest(unittest.TestCase):
             },
             "style": "form",
             "explode": True
-        }
-        self._validate_data(data, QueryParameter)
+        })
 
-        # A free-form query parameter, allowing undefined parameters of a specific type
-        data = {
-            "in": "query",
-            "name": "freeForm",
-            "schema": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "integer"
-                },
-            },
-            "style": "form"
-        }
-        self._validate_data(data, QueryParameter)
-
-        # A complex parameter using content to define serialization
-        data = {
+    def test_valid_complex_query_parameter(self):
+        self._valid(QueryParameterObjectType, {
             "in": "query",
             "name": "coordinates",
             "content": {
@@ -379,11 +411,10 @@ class SchemaTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        self._validate_data(data, QueryParameter)
+        })
 
-    def test_request_body(self):
-        data = {
+    def test_valid_request_body(self):
+        self._valid(RequestBodyObjectType, {
             "x-schemas": {
                 "User": {
                     "type": "string"
@@ -430,11 +461,10 @@ class SchemaTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        self._validate_data(data, RequestBody)
+        })
 
-    def test_media_type(self):
-        data = {
+    def test_valid_media_type(self):
+        self._valid(MediaTypeObjectType, {
             "x-schemas": {
                 "Pet": {
                     "type": "string"
@@ -473,12 +503,60 @@ class SchemaTest(unittest.TestCase):
                     "$ref": "#/x-examples/frog-example"
                 }
             }
-        }
-        self._validate_data(data, MediaType)
+        })
 
-    def test_response(self):
-        # Response of an array of a complex type
-        data = {
+    def test_valid_responses(self):
+        self._valid(ResponsesObjectType, {
+            "200": {
+                "description": "Successful"
+            },
+            "default": {
+                "description": "Something went wrong"
+            }
+        })
+
+    def test_invalid_responses_with_invalid_response_code(self):
+        self._invalid(
+            ResponsesObjectType,
+            {
+                "code": {
+                    "description": "Something"
+                }
+            },
+            expected_errors={
+                "#": "Should contains HTTP status codes or `default`."
+                     " The following invalid definitions were found: code"
+            }
+        )
+
+    def test_invalid_responses_without_successful_operation_call(self):
+        self._invalid(
+            ResponsesObjectType,
+            {
+                "404": {
+                    "description": "Page not found"
+                }
+            },
+            expected_errors={
+                "#": "Responses should contains response for the successful operation call"
+            }
+        )
+
+    def test_invalid_responses_without_response_codes(self):
+        self._invalid(
+            ResponsesObjectType,
+            {
+                "default": {
+                    "description": "Something went wrong"
+                }
+            },
+            expected_errors={
+                "#": "Responses must contains at least one response code"
+            }
+        )
+
+    def test_valid_response(self):
+        self._valid(ResponseObjectType, {
             "x-schemas": {
                 "VeryComplexType": {
                     "type": "string"
@@ -492,32 +570,6 @@ class SchemaTest(unittest.TestCase):
                         "items": {
                             "$ref": "#/x-schemas/VeryComplexType"
                         }
-                    }
-                }
-            }
-        }
-        self._validate_data(data, Response)
-
-        # Response with a string type
-        data = {
-            "description": "A simple string response",
-            "content": {
-                "text/plain": {
-                    "schema": {
-                        "type": "string"
-                    }
-                }
-            }
-        }
-        self._validate_data(data, Response)
-
-        # Plain text response with headers
-        data = {
-            "description": "A simple string response",
-            "content": {
-                "text/plain": {
-                    "schema": {
-                        "type": "string"
                     }
                 }
             },
@@ -541,25 +593,31 @@ class SchemaTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        self._validate_data(data, Response)
+        })
 
-        # Response with no return value
-        data = {
-            "description": "object created"
-        }
-        self._validate_data(data, Response)
+    def test_valid_response_with_no_return_value(self):
+        self._valid(ResponseObjectType, {
+            "description": "ObjectType created"
+        })
 
-    def test_tag(self):
-        data = {
+    def test_valid_tag(self):
+        self._valid(TagObjectType, {
             "name": "pet",
             "description": "Pets operations"
-        }
-        self._validate_data(data, Tag)
+        })
 
-    def test_schema(self):
-        # Simple Model
-        data = {
+    def test_deprecated_schema(self):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            self._valid(SchemaObjectType, {
+                "deprecated": True,
+            })
+            self.assertEqual(len(w), 1)
+            self.assertTrue(issubclass(w[-1].category, DeprecationWarning))
+            self.assertTrue("deprecated" in str(w[-1].message))
+
+    def test_valid_schema(self):
+        self._valid(SchemaObjectType, {
             "x-schemas": {
                 "Address": {
                     "type": "string"
@@ -582,20 +640,18 @@ class SchemaTest(unittest.TestCase):
                     "minimum": 0
                 }
             }
-        }
-        self._validate_data(data, Schema)
+        })
 
-        # For a simple string to string mapping
-        data = {
+    def test_valid_schema_with_additional_properties(self):
+        self._valid(SchemaObjectType, {
             "type": "object",
             "additionalProperties": {
                 "type": "string"
             }
-        }
-        self._validate_data(data, Schema)
+        })
 
-        # For a string to model mapping
-        data = {
+    def test_valid_schema_for_mapping(self):
+        self._valid(SchemaObjectType, {
             "x-schemas": {
                 "ComplexModel": {
                     "type": "string"
@@ -605,11 +661,10 @@ class SchemaTest(unittest.TestCase):
             "additionalProperties": {
                 "$ref": "#/x-schemas/ComplexModel"
             }
-        }
-        self._validate_data(data, Schema)
+        })
 
-        # Model with Example
-        data = {
+    def test_valid_schema_with_example(self):
+        self._valid(SchemaObjectType, {
             "type": "object",
             "properties": {
                 "id": {
@@ -627,11 +682,10 @@ class SchemaTest(unittest.TestCase):
                 "name": "Puma",
                 "id": 1
             }
-        }
-        self._validate_data(data, Schema)
+        })
 
-        # Models with Composition
-        data = {
+    def test_valid_schema_with_composition(self):
+        self._valid(ComponentsObjectType, {
             "schemas": {
                 "ErrorModel": {
                     "type": "object",
@@ -669,11 +723,10 @@ class SchemaTest(unittest.TestCase):
                     ]
                 }
             }
-        }
-        self._validate_data(data, Components)
+        })
 
-        # Models with Polymorphism Support
-        data = {
+    def test_valid_schema_with_polymorphism_support(self):
+        self._valid(ComponentsObjectType, {
             "schemas": {
                 "Pet": {
                     "type": "object",
@@ -749,11 +802,10 @@ class SchemaTest(unittest.TestCase):
                     ]
                 }
             }
-        }
-        self._validate_data(data, Components)
+        })
 
-    def test_discriminator(self):
-        data = {
+    def test_valid_schema_object_with_discriminator(self):
+        self._valid(SchemaObjectType, {
             "discriminator": {
                 "propertyName": "petType"
             },
@@ -765,26 +817,10 @@ class SchemaTest(unittest.TestCase):
             "required": [
                 "petType"
             ]
-        }
-        self._validate_data(data, Schema)
+        })
 
-        data = {
-            "discriminator": {
-                "propertyName": "petType"
-            },
-            "allOf": [
-                {
-                    "type": "object"
-                }
-            ]
-        }
-        self._must_failed(
-            data,
-            Schema,
-            {'discriminator': ['The discriminator can only be used with the keywords `anyOf` or `oneOf`']}
-        )
-
-        data = {
+    def test_valid_schema_one_of_with_duscriminator(self):
+        self._valid(SchemaObjectType, {
             "discriminator": {
                 "propertyName": "petType"
             },
@@ -800,60 +836,291 @@ class SchemaTest(unittest.TestCase):
                     ]
                 }
             ]
-        }
-        self._validate_data(data, Schema)
+        })
 
-        data = {
-            "schemas": {
-                "Pet": {
-                    "type": "object",
-                    "discriminator": {
-                        "propertyName": "petType",
-                        "mapping": {
-                            "bee": "#/schemas/Bee"
-                        }
-                    }
-                },
-                "Bee": {
-                    "type": "object"
-                }
-            }
-        }
-
-        self._must_failed(
-            data,
-            Components,
+    def test_invalid_schema_invalid_type_for_minimum(self):
+        self._invalid(
+            SchemaObjectType,
             {
-                'schemas': {
-                    'Pet': {
-                        'discriminator': [
-                            'The schema `#/schemas/Bee` is specified in discriminator mapping but'
-                            ' not inherit the super schema `#/schemas/Pet`'
-                        ]
+                "type": "object",
+                "minimum": 314
+            },
+            expected_errors={
+                "#": "`minimum` can only be used for number types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_maximum(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "object",
+                "maximum": 314
+            },
+            expected_errors={
+                "#": "`maximum` can only be used for number types"
+            }
+        )
+
+    def test_invalid_schema_maximum_must_be_greater_than_minimum(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "number",
+                "minimum": 400,
+                "maximum": 314
+            },
+            expected_errors={
+                "#": "The value of `maximum` must be greater than or equal to the value of `minimum`"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_multiple_of(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "string",
+                "multipleOf": 10
+            },
+            expected_errors={
+                "#": "`multipleOf` can only be used for number types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_min_length(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "minLength": 1
+            },
+            expected_errors={
+                "#": "`minLength` can only be used for string types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_max_length(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "maxLength": 255
+            },
+            expected_errors={
+                "#": "`maxLength` can only be used for string types"
+            }
+        )
+
+    def test_invalid_schema_max_length_must_be_greater_than_min_length(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "string",
+                "minLength": 314,
+                "maxLength": 255
+            },
+            expected_errors={
+                "#": "The value of `maxLength` must be greater than or equal to the `minLength` value"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_min_items(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "string",
+                "minItems": 7
+            },
+            expected_errors={
+                "#": "`minItems` can only be used for array types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_max_items(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "string",
+                "maxItems": 256
+            },
+            expected_errors={
+                "#": "`maxItems` can only be used for array types"
+            }
+        )
+
+    def test_invalid_schema_max_items_must_be_greater_than_min_items(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "array",
+                "minItems": 512,
+                "maxItems": 256,
+                "items": {
+                    "description": "Any"
+                }
+            },
+            expected_errors={
+                "#": "The value of `maxItems` must be greater than or equal to the value of `minItems`"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_unique_items(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "uniqueItems": True
+            },
+            expected_errors={
+                "#": "`uniqueItems` can only be used for array types"
+            }
+        )
+
+    def test_invalid_schema_items_required_for_type_array(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "array"
+            },
+            expected_errors={
+                "#": "`items` must be specified for array type"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_properties(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "properties": {}
+            },
+            expected_errors={
+                "#": "`properties` can only be used for object types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_additional_properties(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "additionalProperties": {}
+            },
+            expected_errors={
+                "#": "`additionalProperties` can only be used for object types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_required(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "required": ["id"]
+            },
+            expected_errors={
+                "#": "`required` can only be used for object types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_min_properties(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "minProperties": 5
+            },
+            expected_errors={
+                "#": "`minProperties` can only be used for object types"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_max_properties(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "integer",
+                "maxProperties": 15
+            },
+            expected_errors={
+                "#": "`maxProperties` can only be used for object types"
+            }
+        )
+
+    def test_invalid_schema_max_properties_must_be_greater_than_min_properties(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "object",
+                "minProperties": 15,
+                "maxProperties": 5
+            },
+            expected_errors={
+                "#": "The value of `maxProperties` must be greater than or equal to `minProperties`"
+            }
+        )
+
+    def test_invalid_schema_ambiguous_type(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "minItems": 20,
+                "minProperties": 30
+            },
+            expected_errors={
+                "#": "Schema type is ambiguous defined"
+            }
+        )
+
+    def test_invalid_schema_invalid_type_for_discriminator(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "discriminator": {
+                    "propertyName": "petType"
+                },
+                "allOf": [
+                    {
+                        "type": "object"
+                    }
+                ]
+            },
+            expected_errors={
+                "#": "The `discriminator` can only be used with the keywords `anyOf` or `oneOf`"
+            }
+        )
+
+    def test_invalid_schema_read_only_and_write_only_are_mutually_exclusive(self):
+        self._invalid(
+            SchemaObjectType,
+            {
+                "type": "string",
+                "readOnly": True,
+                "writeOnly": True
+            },
+            expected_errors={
+                "#": "`readOnly` and` writeOnly` are mutually exclusive and cannot be set simultaneously"
+            }
+        )
+
+    def test_valid_schema_with_recursive_dependency(self):
+        self._valid(
+            ComponentsObjectType,
+            {
+                "schemas": {
+                    "Pet": {
+                        "properties": {
+                            "parent": {
+                                '$ref': '#/schemas/Pet'
+                            }
+                        }
                     }
                 }
             }
         )
 
-    def test_recursive_dependencies(self):
-        data = {
-            "schemas": {
-                "Pet": {
-                    "allOf": [
-                        {
-                            '$ref': '#/schemas/Pet'
-                        }
-                    ]
-                }
-            }
-        }
-        self._must_failed(
-            data,
-            Components,
-            {'schemas': {u'Pet': {'allOf': [u'Has recursive dependency']}}}
-        )
-
-        data = {
+    def test_valid_schema_with_recursive_references(self):
+        self._valid(ComponentsObjectType, {
             "schemas": {
                 "Pet": {
                     "allOf": [
@@ -871,40 +1138,40 @@ class SchemaTest(unittest.TestCase):
                     }
                 }
             }
-        }
-        self._validate_data(data, Components)
+        })
 
-    def test_unresolvable_recursive_reference(self):
-        data = {
-            "schemas": {
-                "Pet": {
-                    "$ref": "#/schemas/Bee"
-                },
-                "Bee": {
-                    "$ref": "#/schemas/Pet"
+    def test_unresolvable_recursive_references_through_other(self):
+        self._invalid(
+            ComponentsObjectType,
+            {
+                "schemas": {
+                    "Pet": {
+                        "$ref": "#/schemas/Bee"
+                    },
+                    "Bee": {
+                        "$ref": "#/schemas/Pet"
+                    }
                 }
+            },
+            expected_errors={
+                "#/schemas/Bee": "$refs must reference a valid location in the document",
+                "#/schemas/Pet": "Unresolvable recursive reference was found"
             }
-        }
-
-        self._must_failed(
-            data,
-            Components,
-            {'schemas': {'Pet': ['Unresolvable recursive reference #/schemas/Bee'],
-                         'Bee': ['Unresolvable recursive reference #/schemas/Pet']}}
         )
 
-        data = {
-            "schemas": {
-                "Pet": {
-                    "$ref": "#/schemas/Pet"
+    def test_unresolvable_recursive_reference_on_self(self):
+        self._invalid(
+            ComponentsObjectType,
+            {
+                "schemas": {
+                    "Pet": {
+                        "$ref": "#/schemas/Pet"
+                    }
                 }
+            },
+            expected_errors={
+                "#/schemas/Pet": "Unresolvable recursive reference was found"
             }
-        }
-
-        self._must_failed(
-            data,
-            Components,
-            {'schemas': {'Pet': ['Unresolvable recursive reference #/schemas/Pet']}}
         )
 
 

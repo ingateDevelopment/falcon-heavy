@@ -1,22 +1,24 @@
 from __future__ import absolute_import
 
+import sys
+
 import six
 
-try:
+try:  # pragma: no cover
     from collections import Mapping, MutableMapping, Sequence  # noqa
 except ImportError:  # pragma: no cover
     from collections.abc import Mapping, MutableMapping, Sequence  # noqa
 
 
-try:
+try:  # pragma: no cover
     from collections import ChainMap  # noqa
-except ImportError:
+except ImportError:  # pragma: no cover
     """ Code extracted from CPython 3 stdlib:
     https://github.com/python/cpython/blob/85f2c89ee8223590ba08e3aea97476f76c7e3734/Lib/collections/__init__.py#L852
 
     """
 
-    class ChainMap(MutableMapping):  # pragma: no cover
+    class ChainMap(MutableMapping):
         """A ChainMap groups multiple dicts (or other mappings) together
         to create a single, updatable view.
         The underlying mappings are stored in a list.  That list is public and can
@@ -115,7 +117,32 @@ except ImportError:
             self.maps[0].clear()
 
 
-if six.PY3:
+if six.PY3:  # pragma: no cover
     from functools import lru_cache  # noqa
-else:
+
+    def to_bytes(x, charset=sys.getdefaultencoding(), errors='strict'):
+        if x is None:
+            return None
+
+        if isinstance(x, (bytes, bytearray, memoryview)):
+            return bytes(x)
+
+        if isinstance(x, str):
+            return x.encode(charset, errors)
+
+        raise TypeError('Expected bytes')
+
+else:  # pragma: no cover
     from functools32 import lru_cache  # noqa
+
+    def to_bytes(x, charset=sys.getdefaultencoding(), errors='strict'):
+        if x is None:
+            return None
+
+        if isinstance(x, (bytes, bytearray, buffer)):
+            return bytes(x)
+
+        if isinstance(x, unicode):
+            return x.encode(charset, errors)
+
+        raise TypeError('Expected bytes')

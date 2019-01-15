@@ -1,16 +1,21 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .external_documentation import ExternalDocumentation
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
+from .external_documentation import ExternalDocumentationObjectType
 
 
-Tag = types.Schema(
-    name='Tag',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'name': types.StringType(required=True),
+class TagObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'name': types.StringType(),
         'description': types.StringType(),
-        'externalDocs': types.ObjectType(ExternalDocumentation)
+        'externalDocs': ExternalDocumentationObjectType()
     }
-)
+
+    REQUIRED = {
+        'name'
+    }

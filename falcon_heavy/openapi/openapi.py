@@ -1,35 +1,36 @@
+from __future__ import unicode_literals
+
 import re
 
 from ..schema import types
 
-from .external_documentation import ExternalDocumentation
-from .paths import Paths
-from .info import Info
-from .tag import Tag
-from .server import Server
-from .components import Components
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
+from .external_documentation import ExternalDocumentationObjectType
+from .paths import PathsObjectType
+from .info import InfoObjectType
+from .security_requirement import SecurityRequirementObjectType
+from .tag import TagObjectType
+from .server import ServerObjectType
+from .components import ComponentsObjectType
 
 
-OPENAPI_VERSION = '3.0.1'
+class OpenApiObjectType(BaseOpenApiObjectType):
 
+    __slots__ = []
 
-OpenApi = types.Schema(
-    name='OpenApi',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'openapi': types.StringType(required=True, pattern=re.compile(r'^3\.\d+\.\d+$')),
-        'info': types.ObjectType(Info, required=True),
-        'servers': types.ArrayType(types.ObjectType(Server)),
-        'paths': types.ObjectType(
-            Paths,
-            required=True,
-            messages={'additional_properties': "Path MUST be starts with slash"}
-        ),
-        'components': types.ObjectType(Components),
-        'security': types.DictType(types.ArrayType(types.StringType())),
-        'tags': types.ArrayType(types.ObjectType(Tag), unique_items=True, key='name'),
-        'externalDocs': types.ObjectType(ExternalDocumentation)
+    PROPERTIES = {
+        'openapi': types.StringType(pattern=re.compile(r'^3\.\d+\.\d+$')),
+        'info': InfoObjectType(),
+        'servers': types.ArrayType(ServerObjectType()),
+        'paths': PathsObjectType(),
+        'components': ComponentsObjectType(),
+        'security': SecurityRequirementObjectType(),
+        'tags': types.ArrayType(TagObjectType(), unique_items=True, unique_item_properties=['name']),
+        'externalDocs': ExternalDocumentationObjectType()
     }
-)
+
+    REQUIRED = {
+        'openapi',
+        'info',
+        'paths'
+    }

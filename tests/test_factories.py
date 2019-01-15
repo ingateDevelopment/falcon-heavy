@@ -1,23 +1,62 @@
 from __future__ import absolute_import, unicode_literals
 
 import datetime
+from contextlib import contextmanager
+
+from six import iteritems
 
 import rfc3339
 
 import unittest
 
-from falcon_heavy.openapi import Schema, Components
-from falcon_heavy.openapi.factories import PropertyFactory
-from falcon_heavy.openapi import factories
+from hic_falcon_heavy.openapi import (
+    SchemaObjectType,
+    ComponentsObjectType
+)
+from hic_falcon_heavy.factories.properties import PropertyFactory, PROPERTY_GENERATION_MODE
 
-from falcon_heavy.schema.types import Object, Context
-from falcon_heavy.schema.cursor import Cursor
-from falcon_heavy.schema.exceptions import SchemaError
+from hic_falcon_heavy.schema.path import Path
+from hic_falcon_heavy.schema.ref_resolver import RefResolver
+from hic_falcon_heavy.schema.exceptions import SchemaError, Error
 
 
 class FactoriesTest(unittest.TestCase):
 
-    def test_generate_oneOf(self):
+    @staticmethod
+    def _load(object_type, specification):
+        return object_type().convert(
+            specification,
+            Path(''),
+            strict=True,
+            registry={},
+            ref_resolver=RefResolver('', specification)
+        )
+
+    @staticmethod
+    def _generate_property(schema, mode=PROPERTY_GENERATION_MODE.READ_ONLY):
+        factory = PropertyFactory(mode=mode)
+        return factory.generate(schema)
+
+    @staticmethod
+    def _convert(t, payload, strict=True):
+        return t.convert(payload, Path(''), strict=strict)
+
+    @contextmanager
+    def assertSchemaErrorRaises(self, expected_errors=None):
+        with self.assertRaises(SchemaError) as ctx:
+            yield
+
+        if expected_errors is not None:
+            self.assertEqual(len(expected_errors), len(ctx.exception.errors))
+
+            for path, message in iteritems(expected_errors):
+                self.assertTrue(
+                    Error(Path(path), message) in ctx.exception.errors,
+                    msg="An error at %s with message \"%s\" was expected, but these errors were received:\n%s" % (
+                        path, message, ctx.exception.errors)
+                )
+
+    def test_generate_one_of(self):
         spec = {
             'x-schemas': {
                 'Cat': {
@@ -54,8 +93,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         cat_payload = {
             'pet': {
@@ -63,7 +102,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        cat = prop.unmarshal(Cursor.from_raw(cat_payload))
+        cat = self._convert(prop, cat_payload)
         self.assertEqual(cat['pet']['name'], 'Misty')
 
         dog_payload = {
@@ -72,10 +111,10 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        dog = prop.unmarshal(Cursor.from_raw(dog_payload))
+        dog = self._convert(prop, dog_payload)
         self.assertEqual(dog['pet']['nickname'], 'Max')
 
-        # Implicit discriminator
+    def test_generate_oneof_with_implicit_discriminator(self):
         spec = {
             'schemas': {
                 'Cat': {
@@ -128,8 +167,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Components, spec)
-        prop = PropertyFactory.generate(schema['schemas']['Pet'])
+        schema = self._load(ComponentsObjectType, spec)
+        prop = self._generate_property(schema['schemas']['Pet'])
 
         cat_payload = {
             'pet': {
@@ -138,7 +177,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        cat = prop.unmarshal(Cursor.from_raw(cat_payload))
+        cat = self._convert(prop, cat_payload)
         self.assertEqual(cat['pet']['name'], 'Misty')
         self.assertEqual(cat['pet']['pet_type'], 'Cat')
 
@@ -149,12 +188,10 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(ambiguous_cat_payload))
-        except SchemaError as e:
-            self.assertTrue("No one of property types are not matched to discriminator value" in str(e))
-        else:
-            self.fail("MUST failed because pet type not specified")
+        with self.assertSchemaErrorRaises({
+            '#/pet': "The discriminator value should be equal to one of the following values: Cat, Dog"
+        }):
+            self._convert(prop, ambiguous_cat_payload)
 
         dog_with_cat_properties = {
             'pet': {
@@ -163,14 +200,13 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(dog_with_cat_properties))
-        except SchemaError as e:
-            self.assertTrue("Unexpected additional property" in str(e))
-        else:
-            self.fail("MUST failed because Dog not accept additional properties")
+        with self.assertSchemaErrorRaises({
+            '#/pet': "No unspecified properties are allowed."
+                     " The following unspecified properties were found: name"
+        }):
+            self._convert(prop, dog_with_cat_properties)
 
-        # Semi explicit discriminator
+    def test_generate_one_of_with_semi_explicit_discriminator(self):
         spec = {
             'schemas': {
                 'Cat': {
@@ -227,8 +263,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Components, spec)
-        prop = PropertyFactory.generate(schema['schemas']['Pet'])
+        schema = self._load(ComponentsObjectType, spec)
+        prop = self._generate_property(schema['schemas']['Pet'])
 
         cat_payload = {
             'pet': {
@@ -237,7 +273,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        cat = prop.unmarshal(Cursor.from_raw(cat_payload))
+        cat = self._convert(prop, cat_payload)
         self.assertEqual(cat['pet']['name'], 'Misty')
 
         dog_payload = {
@@ -247,7 +283,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        dog = prop.unmarshal(Cursor.from_raw(dog_payload))
+        dog = self._convert(prop, dog_payload)
         self.assertEqual(dog['pet']['nickname'], 'Max')
 
         unknown_payload = {
@@ -257,13 +293,12 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(unknown_payload))
-        except SchemaError as e:
-            self.assertTrue("No one of property types are not matched to discriminator value" in str(e))
-        else:
-            self.fail("MUST failed because object has unknown pet type")
+        with self.assertSchemaErrorRaises({
+            '#/pet': "The discriminator value should be equal to one of the following values: 1, Cat, Dog"
+        }):
+            self._convert(prop, unknown_payload)
 
+    def test_generate_discriminator_with_inline_schemas(self):
         # Discriminator with inline schemas
         spec = {
             'x-schemas': {
@@ -331,22 +366,20 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         inline_payload = {
             'pet': {
-                'pet_type': 'Inline',
+                'pet_type': 2,
                 'last_name': 'Misty'
             }
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(inline_payload))
-        except SchemaError as e:
-            self.assertTrue("No one of property types are not matched to discriminator value" in str(e))
-        else:
-            self.fail("MUST failed because inline schema in oneOf not considered")
+        with self.assertSchemaErrorRaises({
+            '#/pet': "The discriminator value should be equal to one of the following values: Cat, Dog"
+        }):
+            self._convert(prop, inline_payload)
 
     def test_generate_anyOf(self):
         spec = {
@@ -385,8 +418,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         cat_payload = {
             'pet': {
@@ -394,7 +427,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        cat = prop.unmarshal(Cursor.from_raw(cat_payload))
+        cat = self._convert(prop, cat_payload)
         self.assertEqual(cat['pet']['name'], 'Misty')
 
         dog_payload = {
@@ -403,7 +436,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        dog = prop.unmarshal(Cursor.from_raw(dog_payload))
+        dog = self._convert(prop, dog_payload)
         self.assertEqual(dog['pet']['nickname'], 'Max')
 
         not_any_payload = {
@@ -412,22 +445,14 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(not_any_payload))
-        except SchemaError as e:
-            self.assertEqual(
-                e.errors,
-                {
-                    "pet": {
-                        "__any__": [
-                            {"weight": "Unexpected additional property"},
-                            {"weight": "Unexpected additional property"}
-                        ]
-                    }
-                }
-            )
-        else:
-            self.fail("MUST failed because payload not match for all of schemas")
+        with self.assertSchemaErrorRaises({
+            '#/pet': "Does not match any schemas from `anyOf`",
+            '#/pet/0': "No unspecified properties are allowed."
+                       " The following unspecified properties were found: weight",
+            '#/pet/1': "No unspecified properties are allowed."
+                       " The following unspecified properties were found: weight"
+        }):
+            self._convert(prop, not_any_payload)
 
         spec = {
             'x-schemas': {
@@ -463,8 +488,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         cat_dog_payload = {
             'pet': {
@@ -473,7 +498,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        cat_dog = prop.unmarshal(Cursor.from_raw(cat_dog_payload))
+        cat_dog = self._convert(prop, cat_dog_payload)
         self.assertEqual(cat_dog['pet']['name'], 'Misty')
         self.assertEqual(cat_dog['pet']['nickname'], 'Max')
 
@@ -515,8 +540,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         cat_dog_payload = {
             'pet': {
@@ -526,7 +551,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        cat_dog = prop.unmarshal(Cursor.from_raw(cat_dog_payload), context=Context(strict=False))
+        cat_dog = self._convert(prop, cat_dog_payload, strict=False)
         self.assertEqual(cat_dog['pet']['name'], 'Misty')
         self.assertEqual(cat_dog['pet']['nickname'], 'Max')
         self.assertTrue(isinstance(cat_dog['pet']['s'], int))
@@ -544,8 +569,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'adsad': 'sdsd',
@@ -571,7 +596,7 @@ class FactoriesTest(unittest.TestCase):
             ]
         }
 
-        root = prop.unmarshal(Cursor.from_raw(payload))
+        root = self._convert(prop, payload)
         self.assertEqual(root['adsad'], 'sdsd')
 
     def test_defaults(self):
@@ -584,12 +609,12 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {}
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['with_default'], 5)
 
         spec = {
@@ -602,17 +627,15 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {}
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, {"with_default": ["Value did not match to pattern"]})
-        else:
-            self.fail("MUST failed because default value doesn't match to pattern")
+        with self.assertSchemaErrorRaises({
+            '#/with_default': "Does not match to pattern"
+        }):
+            self._convert(prop, payload)
 
     def test_enum_primitive(self):
         spec = {
@@ -624,26 +647,24 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': 5
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop'], 5)
 
         payload = {
             'prop': 45
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, {"prop": ["Value is invalid. Expected one of: 5, ret, 56"]})
-        else:
-            self.fail("MUST failed because property value doesn't match to enumerated values")
+        with self.assertSchemaErrorRaises({
+            '#/prop': "Should be equal to one of the allowed values. Allowed values: 5, 56, ret"
+        }):
+            self._convert(prop, payload)
 
         spec = {
             'properties': {
@@ -654,14 +675,14 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': '5'
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop'], '5')
 
         spec = {
@@ -673,14 +694,14 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': True
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop'], True)
 
     def test_enum_list(self):
@@ -696,33 +717,31 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': [3]
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop'], [3])
 
         payload = {
             'prop': [1, 4]
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop'], [1, 4])
 
         payload = {
             'prop': [1, 45]
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, {"prop": ["Value is invalid. Expected one of: [3], [1, 4]"]})
-        else:
-            self.fail("MUST failed because property value doesn't match to enumerated values")
+        with self.assertSchemaErrorRaises({
+            '#/prop': "Should be equal to one of the allowed values. Allowed values: [1, 4], [3]"
+        }):
+            self._convert(prop, payload)
 
     def test_enum_object(self):
         spec = {
@@ -741,8 +760,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': {
@@ -750,7 +769,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop']['type'], 0)
 
         payload = {
@@ -759,7 +778,7 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop']['type'], None)
 
         payload = {
@@ -768,12 +787,10 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertTrue('Expected one of' in str(e))
-        else:
-            self.fail("MUST failed because property value doesn't match to enumerated values")
+        with self.assertSchemaErrorRaises({
+            '#/prop': "Should be equal to one of the allowed values. Allowed values: {u'type': 0}, {u'type': None}"
+        }):
+            self._convert(prop, payload)
 
     def test_required(self):
         spec = {
@@ -791,8 +808,8 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': {
@@ -800,29 +817,25 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop']['subprop'], 314)
 
         payload = {
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, {"prop": ["Missing value of required property"]})
-        else:
-            self.fail("MUST failed because property is required")
+        with self.assertSchemaErrorRaises({
+            '#': "The following required properties are missed: prop"
+        }):
+            self._convert(prop, payload)
 
         payload = {
             'prop': {}
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, {"prop": {"subprop": ["Missing value of required property"]}})
-        else:
-            self.fail("MUST failed because sub property is required")
+        with self.assertSchemaErrorRaises({
+            '#/prop': "The following required properties are missed: subprop"
+        }):
+            self._convert(prop, payload)
 
     def test_nullable(self):
         spec = {
@@ -834,14 +847,14 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': None
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop'], None)
 
         spec = {
@@ -853,19 +866,17 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop': None
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertTrue("Property not allow null values" in str(e))
-        else:
-            self.fail("MUST failed because null values not allowed")
+        with self.assertSchemaErrorRaises({
+            '#/prop': "Null values not allowed"
+        }):
+            self._convert(prop, payload)
 
     def test_strict(self):
         spec = {
@@ -875,24 +886,20 @@ class FactoriesTest(unittest.TestCase):
             ]
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = 5
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(
-                e.errors,
-                {"__all__": [["Couldn't interpret value as string"]]}
-            )
-        else:
-            self.fail("MUST failed because payload is not string")
+        with self.assertSchemaErrorRaises({
+            '#': "Does not match all schemas from `allOf`. Invalid schema indexes: 1",
+            '#/1': "Should be a string"
+        }):
+            self._convert(prop, payload)
 
         payload = 5
 
-        obj = prop.unmarshal(Cursor.from_raw(payload), context=Context(strict=False))
+        obj = self._convert(prop, payload, strict=False)
         self.assertEqual(obj, '5')
 
     def test_date(self):
@@ -907,14 +914,14 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'date': today.isoformat()
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['date'], today)
 
     def test_datetime(self):
@@ -929,14 +936,14 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'datetime': rfc3339.rfc3339(now)
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['datetime'], now)
 
     def test_min_max_properties(self):
@@ -949,15 +956,15 @@ class FactoriesTest(unittest.TestCase):
             }
         }
 
-        schema = Object.from_raw(Schema, spec)
-        prop = PropertyFactory.generate(schema)
+        schema = self._load(SchemaObjectType, spec)
+        prop = self._generate_property(schema)
 
         payload = {
             'prop1': 'abracadabra',
             'prop2': 2
         }
 
-        obj = prop.unmarshal(Cursor.from_raw(payload))
+        obj = self._convert(prop, payload)
         self.assertEqual(obj['prop1'], 'abracadabra')
         self.assertEqual(obj['prop2'], 2)
 
@@ -965,12 +972,10 @@ class FactoriesTest(unittest.TestCase):
             'prop1': 'abracadabra'
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, ["Object does not have enough properties"])
-        else:
-            self.fail("MUST failed because properties count less than specified in `minProperties`")
+        with self.assertSchemaErrorRaises({
+            '#': "Object must have at least 2 properties. It had only 1 properties"
+        }):
+            self._convert(prop, payload)
 
         payload = {
             'prop1': 'abracadabra',
@@ -980,47 +985,46 @@ class FactoriesTest(unittest.TestCase):
             'prop5': 5
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, ["Object has too many properties"])
-        else:
-            self.fail("MUST failed because properties count more than specified in `maxProperties`")
+        with self.assertSchemaErrorRaises({
+            '#': "Object must have no more than 4 properties. It had 5 properties"
+        }):
+            self._convert(prop, payload)
 
-    def test_styles(self):
-        primitive = '5'
-        lst = ['3', '4', '5']
-        obj = {'role': 'admin', 'firstName': 'Alex'}
-        self.assertEqual(factories.style_simple_primitive('5', True), primitive)
-        self.assertEqual(factories.style_simple_primitive('5', False), primitive)
-        self.assertEqual(factories.style_simple_array('3,4,5', True), lst)
-        self.assertEqual(factories.style_simple_array('3,4,5', False), lst)
-        self.assertEqual(factories.style_simple_objects('role,admin,firstName,Alex', False), obj)
-        self.assertEqual(factories.style_simple_objects('role=admin,firstName=Alex', True), obj)
-        self.assertEqual(factories.style_label_primitive('.5', True), primitive)
-        self.assertEqual(factories.style_label_primitive('.5', False), primitive)
-        self.assertEqual(factories.style_label_array('.3.4.5', True), lst)
-        self.assertEqual(factories.style_label_array('.3,4,5', False), lst)
-        self.assertEqual(factories.style_label_object('.role=admin.firstName=Alex', True), obj)
-        self.assertEqual(factories.style_label_object('.role,admin,firstName,Alex', False), obj)
-        self.assertEqual(factories.style_matrix_primitive(';id=5', True), primitive)
-        self.assertEqual(factories.style_matrix_primitive(';id=5', False), primitive)
-        self.assertEqual(factories.style_matrix_array(';id=3;id=4;id=5', True), lst)
-        self.assertEqual(factories.style_matrix_array(';id=3,4,5', False), lst)
-        self.assertEqual(factories.style_matrix_object(';role=admin;firstName=Alex', True), obj)
-        self.assertEqual(factories.style_matrix_object(';id=role,admin,firstName,Alex', False), obj)
-        self.assertEqual(factories.style_form_primitive('5', True), primitive)
-        self.assertEqual(factories.style_form_primitive('5', False), primitive)
-        self.assertEqual(factories.style_form_array(lst, True), lst)
-        self.assertEqual(factories.style_form_array('3,4,5', False), lst)
-        self.assertEqual(factories.style_form_object('role,admin,firstName,Alex', False), obj)
-        self.assertEqual(factories.style_space_delimited_array('3 4 5', False), lst)
-        self.assertEqual(factories.style_pipe_delimited_array('3|4|5', False), lst)
+    # def test_styles(self):
+    #     primitive = '5'
+    #     lst = ['3', '4', '5']
+    #     obj = {'role': 'admin', 'firstName': 'Alex'}
+    #     self.assertEqual(factories.style_simple_primitive('5', True), primitive)
+    #     self.assertEqual(factories.style_simple_primitive('5', False), primitive)
+    #     self.assertEqual(factories.style_simple_array('3,4,5', True), lst)
+    #     self.assertEqual(factories.style_simple_array('3,4,5', False), lst)
+    #     self.assertEqual(factories.style_simple_objects('role,admin,firstName,Alex', False), obj)
+    #     self.assertEqual(factories.style_simple_objects('role=admin,firstName=Alex', True), obj)
+    #     self.assertEqual(factories.style_label_primitive('.5', True), primitive)
+    #     self.assertEqual(factories.style_label_primitive('.5', False), primitive)
+    #     self.assertEqual(factories.style_label_array('.3.4.5', True), lst)
+    #     self.assertEqual(factories.style_label_array('.3,4,5', False), lst)
+    #     self.assertEqual(factories.style_label_object('.role=admin.firstName=Alex', True), obj)
+    #     self.assertEqual(factories.style_label_object('.role,admin,firstName,Alex', False), obj)
+    #     self.assertEqual(factories.style_matrix_primitive(';id=5', True), primitive)
+    #     self.assertEqual(factories.style_matrix_primitive(';id=5', False), primitive)
+    #     self.assertEqual(factories.style_matrix_array(';id=3;id=4;id=5', True), lst)
+    #     self.assertEqual(factories.style_matrix_array(';id=3,4,5', False), lst)
+    #     self.assertEqual(factories.style_matrix_object(';role=admin;firstName=Alex', True), obj)
+    #     self.assertEqual(factories.style_matrix_object(';id=role,admin,firstName,Alex', False), obj)
+    #     self.assertEqual(factories.style_form_primitive('5', True), primitive)
+    #     self.assertEqual(factories.style_form_primitive('5', False), primitive)
+    #     self.assertEqual(factories.style_form_array(lst, True), lst)
+    #     self.assertEqual(factories.style_form_array('3,4,5', False), lst)
+    #     self.assertEqual(factories.style_form_object('role,admin,firstName,Alex', False), obj)
+    #     self.assertEqual(factories.style_space_delimited_array('3 4 5', False), lst)
+    #     self.assertEqual(factories.style_pipe_delimited_array('3|4|5', False), lst)
 
     def test_polymorphic(self):
         spec = {
             "schemas": {
                 "Pet": {
+                    "deprecated": True,
                     "type": "object",
                     "discriminator": {
                         "propertyName": "petType"
@@ -1087,14 +1091,14 @@ class FactoriesTest(unittest.TestCase):
                             "required": [
                                 "packSize"
                             ]
-                        }
+                        },
                     ]
                 }
             }
         }
 
-        schema = Object.from_raw(Components, spec)
-        prop = PropertyFactory.generate(schema['schemas']['Pet'])
+        schema = self._load(ComponentsObjectType, spec)
+        prop = self._generate_property(schema['schemas']['Pet'])
 
         payload = {
             "petType": "Cat",
@@ -1103,7 +1107,7 @@ class FactoriesTest(unittest.TestCase):
             "age": 3
         }
 
-        cat = prop.unmarshal(Cursor.from_raw(payload))
+        cat = self._convert(prop, payload)
         self.assertEqual(cat['age'], 3)
         self.assertEqual(cat['name'], "Misty")
         self.assertEqual(cat['huntingSkill'], "adventurous")
@@ -1115,7 +1119,7 @@ class FactoriesTest(unittest.TestCase):
             "age": 2
         }
 
-        dog = prop.unmarshal(Cursor.from_raw(payload))
+        dog = self._convert(prop, payload)
         self.assertEqual(dog['age'], 2)
         self.assertEqual(dog['name'], "Max")
         self.assertEqual(dog['packSize'], 314)
@@ -1124,27 +1128,21 @@ class FactoriesTest(unittest.TestCase):
             "age": 3
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(e.errors, ["Could't discriminate type. Property with name `petType` not found"])
-        else:
-            self.fail("MUST failed because `petType` not specified")
+        with self.assertSchemaErrorRaises({
+            '#': "A property with name 'petType' must be present"
+        }):
+            self._convert(prop, payload)
 
         payload = {
             "petType": "Cat",
             "name": "Misty"
         }
 
-        try:
-            prop.unmarshal(Cursor.from_raw(payload))
-        except SchemaError as e:
-            self.assertEqual(
-                e.errors,
-                {"__all__": [{"huntingSkill": ["Missing value of required property"]}]}
-            )
-        else:
-            self.fail("MUST failed because `huntingSkill` property of `Cat` schema is not specified")
+        with self.assertSchemaErrorRaises({
+            '#': "Does not match all schemas from `allOf`. Invalid schema indexes: 1",
+            '#/1': "The following required properties are missed: huntingSkill"
+        }):
+            self._convert(prop, payload)
 
 
 if __name__ == '__main__':

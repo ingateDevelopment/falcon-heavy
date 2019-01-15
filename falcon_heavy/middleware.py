@@ -3,15 +3,14 @@ from __future__ import absolute_import
 from falcon import errors as http_errors
 
 from .schema.exceptions import SchemaError
-from .schema.cursor import Cursor
+from .schema.path import Path
 from .schema.undefined import Undefined
 from .openapi.enums import PARAMETER_LOCATIONS
-from .utils import coalesce
-from .errors import FalconHeavyInvalidRequest
+from .utils.functional import coalesce
 from . import logger
 
 
-def operation_schema(f):
+def operation_schema(responder):
     """Provide operation schema as not `None` positional argument."""
 
     def wrapper(self, req, resp, resource, *args, **kwargs):
@@ -27,7 +26,7 @@ def operation_schema(f):
         if schema is None:
             return
 
-        return f(self, req, resp, resource, schema, *args, **kwargs)
+        return responder(self, req, resp, resource, schema, *args, **kwargs)
 
     return wrapper
 
@@ -45,56 +44,56 @@ class ValidationMiddleware(object):
 
         # Request body is presented if content length more than zero
         try:
-            body = req.media if req.content_length else None
+            content = req.media if req.content_length else None
         except http_errors.HTTPUnsupportedMediaType:
-            body = req.bounded_stream
+            content = req.bounded_stream
 
-        errors = {}
-
-        unmarshalled_parameters = parameters
-        if 'parameters' in schema:
+        if 'request' in schema:
             try:
-                unmarshalled_parameters = schema['parameters'].unmarshal(
-                    Cursor.from_raw(raw=parameters))
+                converted_request = schema['request'].convert(
+                    {
+                        'parameters': parameters,
+                        'body': {
+                            'content': {req.content_type: content} if content is not None else Undefined
+                        }
+                    },
+                    Path('#/request'),
+                    strict=True
+                )
+
+                converted_parameters = converted_request['parameters']
+                converted_content = converted_request['body'].get('content', content)
+
+                for location in PARAMETER_LOCATIONS:
+                    setattr(req, '{}_params'.format(location), converted_parameters[location])
+
+                req.content = converted_content
+
             except SchemaError as e:
-                errors.update(e.errors)
-
-        unmarshalled_body = body
-        if 'requestBody' in schema:
-            try:
-                unmarshalled_body = schema['requestBody'].unmarshal(Cursor.from_raw(
-                    raw={req.content_type: body} if body is not None else Undefined
-                ))
-            except SchemaError as e:
-                if isinstance(e.errors, dict) and req.content_type in e.errors:
-                    errors.update({'body': e.errors[req.content_type]})
-                else:
-                    errors.update({'body': e.errors})
-
-            unmarshalled_body = unmarshalled_body.get(req.content_type)
-
-        if errors:
-            logger.error("Invalid request `%s`: %s", req.path, errors)
-            raise FalconHeavyInvalidRequest(data=errors)
-
-        for location in PARAMETER_LOCATIONS:
-            setattr(req, '{}_params'.format(location), unmarshalled_parameters[location])
-
-        req.body = unmarshalled_body
+                print("Invalid request at %s\n\n%s" % (req.uri_template, e))
+                logger.error("Invalid request at %s:\n\n%s", req.uri_template, e)
+                raise http_errors.HTTPBadRequest(description=str(e))
 
     @operation_schema
     def process_response(self, req, resp, resource, schema):
-        content = coalesce(resp.media, resp.body, resp.data, resp.stream_len and resp.stream)
+        content = coalesce(resp.body, resp.media, resp.stream_len and resp.stream)
 
         try:
-            schema['responses'].unmarshal(Cursor.from_raw(raw={
-                resp.status[:3]: {
-                    'content': {resp.content_type: content} if resp.content_type else {},
-                    'headers': resp.headers
-                }
-            }))
+            converted_response = schema['responses'].convert(
+                {
+                    resp.status[:3]: {
+                        'content': {resp.content_type: content} if resp.content_type else {},
+                        'headers': resp.headers
+                    }
+                },
+                Path('#/response'),
+                strict=True
+            )
+
+
         except SchemaError as e:
-            logger.error("Invalid response `%s`: %s", req.path, e)
+            print("Invalid response at %s\n\n%s" % (req.uri_template, e))
+            logger.error("Invalid response at %s\n\n%s", req.uri_template, e)
 
 
 class AbstractAuthMiddleware(object):

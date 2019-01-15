@@ -36,9 +36,6 @@ paths:
                   description: base64 encoded file
                   type: string
                   format: byte
-            encoding:
-              id:
-                style: simple
       responses:
         '200':
           description: ok
@@ -87,7 +84,7 @@ paths:
                   type: string
             encoding:
               id:
-                style: simple
+                style: form
       responses:
         '200':
           description: ok
@@ -102,6 +99,8 @@ paths:
             schema:
               required:
                 - id
+                - meta
+                - photo
               properties:
                 id:
                   type: integer
@@ -122,7 +121,7 @@ paths:
                     type: object
             encoding:
               id:
-                style: simple
+                style: form
               photo:
                 # only accept png/jpeg
                 contentType: image/png, image/jpeg

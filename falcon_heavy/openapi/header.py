@@ -1,13 +1,20 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .parameter import HeaderParameter
+from .parameter import BaseParameterObjectType
+from .enums import PARAMETER_STYLES
 
 
-Header = types.Schema(
-    name='Header',
-    bases=HeaderParameter,
-    properties={
-        'name': types.StringType(),
-        'in': types.StringType(default='header', enum=['header'])
+class HeaderObjectType(BaseParameterObjectType):
+
+    __slots__ = []
+
+    MESSAGES = {
+        'deprecated': "Header '{0}' is deprecated"
     }
-)
+
+    PROPERTIES = {
+        'style': types.StringType(enum=(PARAMETER_STYLES.SIMPLE, ), default=PARAMETER_STYLES.SIMPLE),
+        'explode': types.BooleanType(default=False)
+    }

@@ -1,6 +1,8 @@
+from __future__ import unicode_literals
+
 import logging
 
 
-LOGGING_NAME = 'falcon_heavy'
+LOGGER_NAME = 'falcon_heavy'
 
-logger = logging.getLogger(LOGGING_NAME)
+logger = logging.getLogger(LOGGER_NAME)

@@ -1,74 +1,104 @@
-from __future__ import absolute_import
+from __future__ import unicode_literals
 
+import re
+import datetime
 import base64
+from decimal import Decimal
 
 import six
+from six.moves import html_entities
 
 import wrapt
 
-from werkzeug.datastructures import Headers
-from werkzeug.http import parse_options_header
+
+class FalconHeavyUnicodeDecodeError(UnicodeDecodeError):
+    def __init__(self, obj, *args):
+        self.obj = obj
+        UnicodeDecodeError.__init__(self, *args)
+
+    def __str__(self):
+        original = UnicodeDecodeError.__str__(self)
+        return '%s. You passed in %r (%s)' % (original, self.obj, type(self.obj))
 
 
-def coalesce(*args):
-    """Returns the first not None item.
+_PROTECTED_TYPES = six.integer_types + (
+    type(None), float, Decimal, datetime.datetime, datetime.date, datetime.time
+)
 
-    :param args: list of items for checking
-    :return the first not None item, or None
+
+def is_protected_type(obj):
+    """Determine if the object instance is of a protected type.
+    Objects of protected types are preserved as-is when passed to
+    force_text(strings_only=True).
     """
+    return isinstance(obj, _PROTECTED_TYPES)
+
+
+def force_text(s, encoding='utf-8', strings_only=False, errors='strict'):
+    """
+    Similar to smart_text, except that lazy instances are resolved to
+    strings, rather than kept as lazy objects.
+    If strings_only is True, don't convert (some) non-string-like objects.
+    """
+    # Handle the common case first for performance reasons.
+    if issubclass(type(s), six.text_type):
+        return s
+    if strings_only and is_protected_type(s):
+        return s
     try:
-        return next((arg for arg in args if arg is not None))
-    except StopIteration:
-        return None
+        if not issubclass(type(s), six.string_types):
+            if six.PY3:
+                if isinstance(s, bytes):
+                    s = six.text_type(s, encoding, errors)
+                else:
+                    s = six.text_type(s)
+            elif hasattr(s, '__unicode__'):
+                s = six.text_type(s)
+            else:
+                s = six.text_type(bytes(s), encoding, errors)
+        else:
+            # Note: We use .decode() here, instead of six.text_type(s, encoding,
+            # errors), so that if s is a SafeBytes, it ends up being a
+            # SafeText at the end.
+            s = s.decode(encoding, errors)
+    except UnicodeDecodeError as e:
+        if not isinstance(s, Exception):
+            raise FalconHeavyUnicodeDecodeError(s, *e.args)
+        else:
+            # If we get to here, the caller has passed in an Exception
+            # subclass populated with non-ASCII bytestring data without a
+            # working unicode method. Try to handle this without raising a
+            # further exception by individually forcing the exception args
+            # to unicode.
+            s = ' '.join(force_text(arg, encoding, strings_only, errors)
+                         for arg in s)
+    return s
 
 
-class FormStorage(six.text_type):
+def _replace_entity(match):
+    text = match.group(1)
+    if text[0] == '#':
+        text = text[1:]
+        try:
+            if text[0] in 'xX':
+                c = int(text[1:], 16)
+            else:
+                c = int(text)
+            return six.unichr(c)
+        except ValueError:
+            return match.group(0)
+    else:
+        try:
+            return six.unichr(html_entities.name2codepoint[text])
+        except (ValueError, KeyError):
+            return match.group(0)
 
-    """Wrapper over multipart form fields."""
 
-    def __new__(cls, value=None, name=None, content_type=None, headers=None):
-        klass = six.text_type.__new__(cls, value)
+_entity_re = re.compile(r"&(#?[xX]?(?:[0-9a-fA-F]+|\w{1,8}));")
 
-        klass.name = name
 
-        if headers is None:
-            headers = Headers()
-
-        if content_type is not None:
-            headers['Content-Type'] = content_type
-
-        klass.headers = headers
-
-        return klass
-
-    def _parse_content_type(self):
-        if not hasattr(self, '_parsed_content_type'):
-            self._parsed_content_type = \
-                parse_options_header(self.content_type)
-
-    @property
-    def content_type(self):
-        """The content-type sent in the header.  Usually not available"""
-        return self.headers.get('content-type')
-
-    @property
-    def mimetype(self):
-        """Like :attr:`content_type`, but without parameters (eg, without
-        charset, type etc.) and always lowercase.  For example if the content
-        type is ``text/HTML; charset=utf-8`` the mimetype would be
-        ``'text/html'``.
-        """
-        self._parse_content_type()
-        return self._parsed_content_type[0].lower()
-
-    @property
-    def mimetype_params(self):
-        """The mimetype parameters as dict.  For example if the content
-        type is ``text/html; charset=utf-8`` the params would be
-        ``{'charset': 'utf-8'}``.
-        """
-        self._parse_content_type()
-        return self._parsed_content_type[1]
+def unescape_entities(text):
+    return _entity_re.sub(_replace_entity, force_text(text))
 
 
 class Base64EncodableStream(wrapt.ObjectProxy):
@@ -116,3 +146,47 @@ class Base64DecodableStream(wrapt.ObjectProxy):
             data = data.encode('ascii')
 
         return base64.b64decode(data)
+
+
+class CachedProperty(object):
+    """
+    Decorator that converts a method with a single self argument into a
+    property cached on the instance.
+    Optional ``name`` argument allows you to make cached properties of other
+    methods. (e.g.  url = cached_property(get_absolute_url, name='url') )
+    """
+    def __init__(self, func, name=None):
+        self.func = func
+        self.__doc__ = getattr(func, '__doc__')
+        self.name = name or func.__name__
+
+    def __get__(self, instance, cls=None):
+        if instance is None:
+            return self
+        res = instance.__dict__[self.name] = self.func(instance)
+        return res
+
+
+cached_property = CachedProperty
+
+
+def coalesce(*args):
+    """Returns the first not None item.
+
+    :param args: list of items for checking
+    :return the first not None item, or None
+    """
+    try:
+        return next((arg for arg in args if arg is not None))
+    except StopIteration:
+        return None
+
+
+def is_flo(value):
+    """Check if value is file-like object."""
+    try:
+        value.read(0)
+    except (AttributeError, TypeError):
+        return False
+
+    return True

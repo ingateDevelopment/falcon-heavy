@@ -1,14 +1,19 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
 
 
-ExternalDocumentation = types.Schema(
-    name='ExternalDocumentation',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
+class ExternalDocumentationObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
         'description': types.StringType(),
-        'url': types.UrlType(required=True)
+        'url': types.UriType()
     }
-)
+
+    REQUIRED = {
+        'url'
+    }

@@ -1,27 +1,21 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
+from .server_variable import ServerVariableObjectType
 
 
-ServerVariable = types.Schema(
-    name='ServerVariable',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'enum': types.ArrayType(types.StringType()),
-        'default': types.StringType(required=True),
-        'description': types.StringType()
-    }
-)
+class ServerObjectType(BaseOpenApiObjectType):
 
+    __slots__ = []
 
-Server = types.Schema(
-    name='Server',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
-        'url': types.StringType(required=True),
+    PROPERTIES = {
+        'url': types.StringType(),
         'description': types.StringType(),
-        'variables': types.DictType(types.ObjectType(ServerVariable))
+        'variables': types.MapType(ServerVariableObjectType())
     }
-)
+
+    REQUIRED = {
+        'url'
+    }

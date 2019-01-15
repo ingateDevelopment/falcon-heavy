@@ -1,19 +1,20 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .server import Server
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
+from .server import ServerObjectType
 
 
-Link = types.Schema(
-    name='Link',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
+class LinkObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
         'operationRef': types.StringType(),
         'operationId': types.StringType(),
-        'parameters': types.DictType(types.AnyType()),
+        'parameters': types.MapType(types.AnyType()),
         'requestBody': types.AnyType(),
         'description': types.StringType(),
-        'server': types.ObjectType(Server)
+        'server': ServerObjectType()
     }
-)

@@ -1,15 +1,16 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
-from .extensions import SpecificationExtensions
+from .base import BaseOpenApiObjectType
 
 
-Contact = types.Schema(
-    name='Contact',
-    pattern_properties=SpecificationExtensions,
-    additional_properties=False,
-    properties={
+class ContactObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
         'name': types.StringType(),
-        'url': types.UrlType(),
+        'url': types.UriType(),
         'email': types.EmailType()
     }
-)

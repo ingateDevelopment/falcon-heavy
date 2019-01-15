@@ -1,11 +1,19 @@
+from __future__ import unicode_literals
+
 from ..schema import types
 
+from .base import BaseOpenApiObjectType
 
-License = types.Schema(
-    name='License',
-    additional_properties=False,
-    properties={
-        'name': types.StringType(required=True),
-        'url': types.UrlType()
+
+class LicenseObjectType(BaseOpenApiObjectType):
+
+    __slots__ = []
+
+    PROPERTIES = {
+        'name': types.StringType(),
+        'url': types.UriType()
     }
-)
+
+    REQUIRED = {
+        'name'
+    }
